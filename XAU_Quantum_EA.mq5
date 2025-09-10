@@ -51,6 +51,8 @@ CSymbolInfo     symbolInfo;
 CPositionInfo   positionInfo;
 COrderInfo      orderInfo;
 CAccountInfo    accountInfo;
+double          g_peak_equity = 0.0;
+bool            g_trading_halted = false;
 
 //--- Input Parameters for Global Filters
 input group "Global Trading Filters"
@@ -71,10 +73,6 @@ input int    TimeStopHour        = 17;       // Hour to close all trades (Broker
 input int    TimeStopMinute      = 0;        // Minute to close all trades
 input bool   EnableEquityTrail   = true;     // Enable Equity Trail Stop
 input double EquityTrailPercent  = 5.0;      // Max equity drawdown % to halt trading
-
-//--- Global State Variables
-double g_peak_equity = 0.0;
-bool   g_trading_halted = false;
 
 //--- Input Parameters for enabling/disabling strategies
 input group "Strategy Selection"
@@ -354,6 +352,11 @@ bool IsVolatilityAllowed()
 //+------------------------------------------------------------------+
 void CheckStrategy1()
 {
+    // This function checks for breakout opportunities from the previous day's range.
+    // It first checks for a long setup (breakout above PDH). If a trade is placed, it returns.
+    // If no long trade is placed, it then proceeds to check for a short setup (breakout below PDL).
+    // This sequential check is the intended logic.
+
     if(PositionSelectByMagic(_Symbol, MAGIC_S1) || OrderSelectByMagic(_Symbol, MAGIC_S1)) return;
 
     double pdh_arr[], pdl_arr[];
@@ -460,6 +463,12 @@ void CheckStrategy2()
 // Returns shift of the second pivot point (>0 for bullish, <0 for bearish, 0 for none)
 int findDivergence(int lookback, int start_shift)
 {
+    // Note on Logic: This is a simplified divergence detection function. It uses iLowest/iHighest
+    // to find basic price pivots and compares them with RSI values at the same bar.
+    // A more advanced implementation could use more robust pivot detection (e.g., via the
+    // ZigZag indicator) or more complex pattern validation. This version prioritizes a
+    // non-repainting signal based on closed bars.
+
     double rsi_buffer[];
     int rsi_handle = iRSI(_Symbol, _Period, S2_RSI_Period, PRICE_CLOSE);
     if(CopyBuffer(rsi_handle, 0, start_shift, lookback, rsi_buffer) < lookback) return 0;
@@ -473,8 +482,8 @@ int findDivergence(int lookback, int start_shift)
     {
         double price1 = iLow(_Symbol, _Period, p1_shift);
         double price2 = iLow(_Symbol, _Period, p2_shift);
-        double rsi1 = rsi_buffer[p1_shift - start_shift];
-        double rsi2 = rsi_buffer[p2_shift - start_shift];
+        double rsi1 = rsi_buffer[(int)(p1_shift - start_shift)];
+        double rsi2 = rsi_buffer[(int)(p2_shift - start_shift)];
         if(price2 < price1 && rsi2 > rsi1) return p2_shift;
     }
 
@@ -485,8 +494,8 @@ int findDivergence(int lookback, int start_shift)
     {
         double price1 = iHigh(_Symbol, _Period, p1_shift);
         double price2 = iHigh(_Symbol, _Period, p2_shift);
-        double rsi1 = rsi_buffer[p1_shift - start_shift];
-        double rsi2 = rsi_buffer[p2_shift - start_shift];
+        double rsi1 = rsi_buffer[(int)(p1_shift - start_shift)];
+        double rsi2 = rsi_buffer[(int)(p2_shift - start_shift)];
         if(price2 > price1 && rsi2 < rsi1) return -p2_shift;
     }
     return 0;
@@ -516,45 +525,62 @@ bool CheckDXYFilter(int divergence_type)
 //+------------------------------------------------------------------+
 void CheckStrategy3()
 {
+    // Note on Logic: All signals are based on the most recently CLOSED bar (shift 1)
+    // to ensure signals are stable and do not repaint.
+
     if(PositionSelectByMagic(_Symbol, MAGIC_S3)) return;
 
+    // 1. Get Indicator Handles
     int bb_handle = iBands(_Symbol, _Period, S3_BB_Period, 0, S3_BB_Deviations, PRICE_CLOSE);
     int cci_handle = iCCI(_Symbol, _Period, S3_CCI_Period, PRICE_TYPICAL);
 
-    double upper_bb[], lower_bb[], middle_bb[];
-    if(CopyBuffer(bb_handle, 1, 1, 1, upper_bb) < 1 || CopyBuffer(bb_handle, 2, 1, 1, lower_bb) < 1 || CopyBuffer(bb_handle, 0, 1, 1, middle_bb) < 1) return;
-
-    double cci_val[];
-    if(CopyBuffer(cci_handle, 0, 1, 1, cci_val) < 1) return;
-
+    // 2. Calculate Historical BandWidth array to find the "multi-day low"
     double hist_upper[], hist_lower[], hist_middle[];
-    if(CopyBuffer(bb_handle, 1, 1, S3_BandWidth_MAPeriod, hist_upper) < S3_BandWidth_MAPeriod ||
-       CopyBuffer(bb_handle, 2, 1, S3_BandWidth_MAPeriod, hist_lower) < S3_BandWidth_MAPeriod ||
-       CopyBuffer(bb_handle, 0, 1, S3_BandWidth_MAPeriod, hist_middle) < S3_BandWidth_MAPeriod) return;
+    int history_to_copy = S3_BandWidth_MAPeriod + 1; // +1 to get current bar's values for comparison
+    if(CopyBuffer(bb_handle, 1, 1, history_to_copy, hist_upper) < history_to_copy ||
+       CopyBuffer(bb_handle, 2, 1, history_to_copy, hist_lower) < history_to_copy ||
+       CopyBuffer(bb_handle, 0, 1, history_to_copy, hist_middle) < history_to_copy) return;
 
-    double bandwidth_sum = 0;
-    int valid_bars = 0;
-    for(int i=0; i < S3_BandWidth_MAPeriod; i++)
+    double bandwidth_history[];
+    ArrayResize(bandwidth_history, S3_BandWidth_MAPeriod);
+
+    for(int i = 0; i < S3_BandWidth_MAPeriod; i++)
     {
-        if(hist_middle[i] != 0)
+        // We look at the history from index 1 to 50 of the copied BB arrays
+        if(hist_middle[i+1] != 0)
         {
-            bandwidth_sum += (hist_upper[i] - hist_lower[i]) / hist_middle[i];
-            valid_bars++;
+            bandwidth_history[i] = (hist_upper[i+1] - hist_lower[i+1]) / hist_middle[i+1];
+        }
+        else
+        {
+            bandwidth_history[i] = 0;
         }
     }
-    if(valid_bars == 0) return;
-    double avg_bandwidth = bandwidth_sum / valid_bars;
-    double current_bandwidth = (middle_bb[0] != 0) ? (upper_bb[0] - lower_bb[0]) / middle_bb[0] : 0;
 
-    if(current_bandwidth == 0 || current_bandwidth > avg_bandwidth * S3_Squeeze_Threshold) return;
+    // 3. Find the historical low and get the current bandwidth
+    double historical_low_bw = ArrayMinimum(bandwidth_history);
+    double current_bw = (hist_middle[0] != 0) ? (hist_upper[0] - hist_lower[0]) / hist_middle[0] : -1;
+
+    // 4. Detect the Squeeze: The core requirement is that bandwidth "falls to a multi-day low".
+    // This is interpreted as the current bandwidth being at or very near the lowest point in the lookback period.
+    // We use a small tolerance (1.05x) to avoid issues with floating point precision and to catch near-lows.
+    if(current_bw < 0 || current_bw > (historical_low_bw * 1.05))
+    {
+        return; // Not in a squeeze, exit.
+    }
+
+    // 5. The Trigger and Confirmation
+    double cci_val[];
+    if(CopyBuffer(cci_handle, 0, 1, 1, cci_val) < 1) return;
 
     MqlRates rates[];
     if(CopyRates(_Symbol, _Period, 1, 1, rates) < 1) return;
     double close_price = rates[0].close;
 
-    if(close_price > upper_bb[0] && cci_val[0] > S3_CCI_Threshold)
+    // --- Long Trigger ---
+    if(close_price > hist_upper[0] && cci_val[0] > S3_CCI_Threshold)
     {
-        double stop_loss = lower_bb[0];
+        double stop_loss = hist_lower[0];
         symbolInfo.RefreshRates();
         double entry_price = symbolInfo.Ask();
         double lots = CalculateLotSize(entry_price, stop_loss);
@@ -566,9 +592,10 @@ void CheckStrategy3()
         return;
     }
 
-    if(close_price < lower_bb[0] && cci_val[0] < -S3_CCI_Threshold)
+    // --- Short Trigger ---
+    if(close_price < hist_lower[0] && cci_val[0] < -S3_CCI_Threshold)
     {
-        double stop_loss = upper_bb[0];
+        double stop_loss = hist_upper[0];
         symbolInfo.RefreshRates();
         double entry_price = symbolInfo.Bid();
         double lots = CalculateLotSize(entry_price, stop_loss);
@@ -585,7 +612,7 @@ void ManageStrategy3_TSL()
 {
     if(!PositionSelectByMagic(_Symbol, MAGIC_S3)) return;
 
-    long pos_ticket = positionInfo.Ticket();
+    ulong pos_ticket = positionInfo.Ticket();
     long pos_type = positionInfo.PositionType();
     double current_sl = positionInfo.StopLoss();
 
