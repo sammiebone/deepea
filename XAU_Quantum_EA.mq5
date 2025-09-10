@@ -5,38 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Quantum Dynamics Labs"
 #property link      "https://www.quantumdynamics.ai"
-#property version   "1.00"
+#property version   "2.00" // New, incremental build
 #property description "A multi-strategy, volatility-aware EA for Gold (XAU)."
-
-//+------------------------------------------------------------------+
-//| EA Logic Overview                                                |
-//+------------------------------------------------------------------+
-/*
-This Expert Advisor is a sophisticated, multi-strategy trading robot designed
-specifically for Gold (XAU). It integrates three distinct trading models with
-a robust framework of global filters and advanced risk management.
-
-Core Framework Features:
-- Multi-Strategy Engine: Runs three independent trading models concurrently,
-  each identified by a unique magic number.
-- Global Time Filter: Restricts all trading activity to specific hours to
-  focus on high-liquidity sessions.
-- Global Volatility Filter: Avoids trading in market conditions that are
-  either too quiet or too chaotic, based on the daily Average True Range (ATR).
-- Dynamic Position Sizing: Calculates lot size for every trade based on a
-  fixed percentage of account equity and the specific stop-loss distance,
-  ensuring consistent risk exposure.
-- Time-Based Stop: Automatically closes all open positions at a set time
-  daily to mitigate overnight and weekend gap risk.
-- Equity Trail Protection: A master circuit-breaker that halts all trading
-  and closes positions if a specified equity drawdown percentage from the
-  peak is reached, protecting the account from severe losses.
-
-Trading Strategy Modules:
-- Strategy 1: Market Structure & Breakout Trading
-- Strategy 2: Momentum Divergence with Macro-Filter
-- Strategy 3: Volatility Squeeze Explosion
-*/
 
 //--- Include libraries
 #include <Trade\Trade.mqh>
@@ -45,7 +15,7 @@ Trading Strategy Modules:
 #include <Trade\OrderInfo.mqh>
 #include <Trade\AccountInfo.mqh>
 
-//--- Global variables
+//--- Global variables & objects
 CTrade          trade;
 CSymbolInfo     symbolInfo;
 CPositionInfo   positionInfo;
@@ -82,10 +52,11 @@ input bool EnableStrategy3 = true; // Enable Volatility Squeeze Explosion
 
 //--- Input Parameters for Strategy 1: Market Structure & Breakout
 input group "S1: Market Structure"
-input int    S1_ConsolidationBars = 4;      // Number of bars for consolidation
-input double S1_BuyStopPips       = 2.0;    // Pips above PDH for Buy Stop
-input double S1_SellStopPips      = 2.0;    // Pips below PDL for Sell Stop
-input double S1_RR_Ratio          = 1.5;    // Risk:Reward Ratio for TP
+input int    S1_ConsolidationBars   = 4;      // Number of bars for consolidation
+input double S1_BreakoutPips        = 2.0;    // Pips beyond level for breakout
+input double S1_RR_Ratio            = 1.5;    // Risk:Reward Ratio for TP
+input double S1_VolumeMultiplier    = 1.5;    // Breakout volume must be X times average
+input int    S1_AvgVolumePeriod     = 20;     // Period for average volume calculation
 
 //--- Input Parameters for Strategy 2: Momentum Divergence
 input group "S2: Momentum Divergence"
@@ -100,33 +71,29 @@ input double S2_SL_Pips_Buffer     = 10;      // Pips to add to SL for buffer
 input group "S3: Volatility Squeeze"
 input int    S3_BB_Period           = 20;      // Bollinger Bands period
 input double S3_BB_Deviations       = 2.0;     // Bollinger Bands deviations
-input int    S3_BandWidth_MAPeriod  = 50;      // MA period for BandWidth
-input double S3_Squeeze_Threshold   = 0.2;     // Squeeze threshold (e.g., 0.2 for 20%)
+input int    S3_BandWidth_MAPeriod  = 50;      // Period to determine historical low BBW
 input int    S3_CCI_Period          = 14;      // CCI period for confirmation
 input double S3_CCI_Threshold       = 100;     // CCI threshold for entry
 input int    S3_ATR_Period          = 14;      // ATR period for trailing stop
 input double S3_ATR_Multiplier      = 2.5;     // ATR multiplier for trailing stop
 
 //--- Magic Numbers for each strategy
-#define MAGIC_S1 1001 // Magic Number for Strategy 1
-#define MAGIC_S2 1002 // Magic Number for Strategy 2
-#define MAGIC_S3 1003 // Magic Number for Strategy 3
+#define MAGIC_S1 1001
+#define MAGIC_S2 1002
+#define MAGIC_S3 1003
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   //--- Initialization
    if(!symbolInfo.Name(_Symbol)) return(INIT_FAILED);
    trade.SetExpertMagicNumber(0);
    trade.SetMarginMode();
    trade.SetTypeFillingBySymbol(_Symbol);
 
-   printf("XAU_Quantum_EA Initialized. Strategies Enabled: S1=%s, S2=%s, S3=%s",
-          (string)EnableStrategy1, (string)EnableStrategy2, (string)EnableStrategy3);
+   printf("XAU_Quantum_EA Initialized.");
 
-   //--- Initialize Equity Trail
    if(EnableEquityTrail)
      {
       accountInfo.Refresh();
@@ -142,12 +109,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   //--- Deinitialization
    printf("XAU_Quantum_EA Deinitialized. Reason: %d", reason);
-   //--- Clean up pending orders on deinit
-   CancelPendingOrders(MAGIC_S1);
-   CancelPendingOrders(MAGIC_S2);
-   CancelPendingOrders(MAGIC_S3);
 }
 
 //+------------------------------------------------------------------+
@@ -155,140 +117,63 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   //--- HALT CHECK ---
    if(g_trading_halted) return;
 
-   //--- Check for new bar
+   //--- New Bar/Tick Logic ---
+   // S1 needs to check every tick for breakouts. Other strategies are new-bar only.
    static datetime lastBarTime = 0;
    datetime currentBarTime = (datetime)SeriesInfoInteger(_Symbol, _Period, SERIES_LASTBAR_DATE);
-   if(currentBarTime == lastBarTime)
-     {
-      return; // Not a new bar, exit
-     }
-   lastBarTime = currentBarTime;
+   bool isNewBar = (currentBarTime != lastBarTime);
+   if(isNewBar)
+   {
+       lastBarTime = currentBarTime;
+   }
 
-   //--- EQUITY TRAIL MANAGEMENT ---
+   //--- FRAMEWORK CHECKS (Run on every tick) ---
    ManageEquityTrail();
-   if(g_trading_halted) return; // Re-check in case it was just triggered
-
-   //--- TIME-BASED STOP ---
+   if(g_trading_halted) return;
    CheckTimeStop();
 
-   //--- GLOBAL FILTERS ---
-   if(!IsTimeAllowed()) return;
-   if(!IsVolatilityAllowed()) return;
+   //--- STRATEGY EXECUTION ---
+   if(EnableStrategy1) CheckStrategy1(); // Runs on every tick
 
-   //--- Run enabled strategies
-   if(EnableStrategy1)
-     {
-      CheckStrategy1();
-     }
-   if(EnableStrategy2)
-     {
-      CheckStrategy2();
-     }
-   if(EnableStrategy3)
-     {
-      ManageStrategy3_TSL();
-      CheckStrategy3();
-     }
+   if(isNewBar) // These strategies only run on new bars
+   {
+      if(!IsTimeAllowed()) return;
+      if(!IsVolatilityAllowed()) return;
+
+      if(EnableStrategy2) CheckStrategy2();
+      if(EnableStrategy3)
+      {
+         ManageStrategy3_TSL();
+         CheckStrategy3();
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
-//| Risk Management Functions                                        |
+//| Risk Management & Filter Functions                               |
 //+------------------------------------------------------------------+
 void ManageEquityTrail()
 {
     if(!EnableEquityTrail || g_trading_halted) return;
-
     accountInfo.Refresh();
     double current_equity = accountInfo.Equity();
+    if(current_equity > g_peak_equity) g_peak_equity = current_equity;
 
-    if(current_equity > g_peak_equity)
-    {
-        g_peak_equity = current_equity;
-    }
-
-    if (g_peak_equity > 0) // Avoid division by zero
+    if (g_peak_equity > 0)
     {
         double drawdown_percent = ((g_peak_equity - current_equity) / g_peak_equity) * 100.0;
-
         if(drawdown_percent >= EquityTrailPercent)
         {
             g_trading_halted = true;
-
-            string message = StringFormat("EQUITY TRAIL TRIGGERED! Trading has been halted. Peak Equity: %.2f, Current Equity: %.2f, Drawdown: %.2f%%",
+            string message = StringFormat("EQUITY TRAIL TRIGGERED! Trading has been halted. Peak: %.2f, Current: %.2f, DD: %.2f%%",
                                           g_peak_equity, current_equity, drawdown_percent);
             printf(message);
             Alert(message);
-
             for(int i = PositionsTotal() - 1; i >= 0; i--)
             {
-                if(positionInfo.SelectByIndex(i))
-                {
-                    int magic = (int)positionInfo.Magic();
-                    if(magic == MAGIC_S1 || magic == MAGIC_S2 || magic == MAGIC_S3)
-                    {
-                        trade.PositionClose(positionInfo.Ticket());
-                    }
-                }
-            }
-        }
-    }
-}
-double CalculateLotSize(double entry_price, double stop_loss_price)
-{
-    if(!EnableDynamicLots) return 0.01;
-
-    accountInfo.Refresh();
-    double account_balance = accountInfo.Balance();
-    double risk_amount = account_balance * (RiskPercent / 100.0);
-    double sl_distance = MathAbs(entry_price - stop_loss_price);
-
-    if(sl_distance <= 0) return 0.0;
-
-    double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-    double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-    if(tick_value <= 0 || tick_size <= 0)
-    {
-        printf("Risk Management: Invalid tick value or size for %s.", _Symbol);
-        return 0.0;
-    }
-
-    double sl_value_per_lot = (sl_distance / tick_size) * tick_value;
-
-    if(sl_value_per_lot <= 0) return 0.0;
-
-    double lot_size = risk_amount / sl_value_per_lot;
-
-    lot_size = NormalizeDouble(lot_size, 2);
-    double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-    double max_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-    double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-
-    if(lot_size < min_lot) lot_size = min_lot;
-    if(lot_size > max_lot) lot_size = max_lot;
-
-    lot_size = MathFloor(lot_size / lot_step) * lot_step;
-
-    return lot_size;
-}
-
-void CheckTimeStop()
-{
-    if(!EnableTimeStop) return;
-
-    MqlDateTime time_struct;
-    TimeCurrent(time_struct);
-
-    if(time_struct.hour > TimeStopHour || (time_struct.hour == TimeStopHour && time_struct.min >= TimeStopMinute))
-    {
-        for(int i = PositionsTotal() - 1; i >= 0; i--)
-        {
-            if(positionInfo.SelectByIndex(i))
-            {
-                int magic = (int)positionInfo.Magic();
-                if(magic == MAGIC_S1 || magic == MAGIC_S2 || magic == MAGIC_S3)
+                if(positionInfo.SelectByIndex(i) && (positionInfo.Magic() == MAGIC_S1 || positionInfo.Magic() == MAGIC_S2 || positionInfo.Magic() == MAGIC_S3))
                 {
                     trade.PositionClose(positionInfo.Ticket());
                 }
@@ -296,232 +181,217 @@ void CheckTimeStop()
         }
     }
 }
-
 //+------------------------------------------------------------------+
-//| Global Filter Functions                                          |
+double CalculateLotSize(double stop_loss_price)
+{
+    if(!EnableDynamicLots) return 0.01;
+    accountInfo.Refresh();
+    symbolInfo.Refresh();
+    double account_balance = accountInfo.Balance();
+    double risk_amount = account_balance * (RiskPercent / 100.0);
+
+    symbolInfo.RefreshRates();
+    double entry_price = stop_loss_price > symbolInfo.Ask() ? symbolInfo.Bid() : symbolInfo.Ask();
+    double sl_distance = MathAbs(entry_price - stop_loss_price);
+
+    if(sl_distance <= 0) return 0.0;
+
+    double tick_value = symbolInfo.TickValue();
+    double tick_size = symbolInfo.TickSize();
+    if(tick_value <= 0 || tick_size <= 0) return 0.0;
+
+    double sl_value_per_lot = (sl_distance / tick_size) * tick_value;
+    if(sl_value_per_lot <= 0) return 0.0;
+
+    double lot_size = risk_amount / sl_value_per_lot;
+
+    lot_size = NormalizeDouble(lot_size, 2);
+    double min_lot = symbolInfo.LotsMin();
+    double max_lot = symbolInfo.LotsMax();
+    double lot_step = symbolInfo.LotsStep();
+
+    if(lot_size < min_lot) lot_size = min_lot;
+    if(lot_size > max_lot) lot_size = max_lot;
+
+    lot_size = MathFloor(lot_size / lot_step) * lot_step;
+    return lot_size;
+}
+//+------------------------------------------------------------------+
+void CheckTimeStop()
+{
+    if(!EnableTimeStop) return;
+    MqlDateTime time_struct;
+    TimeCurrent(time_struct);
+
+    if(time_struct.hour > TimeStopHour || (time_struct.hour == TimeStopHour && time_struct.min >= TimeStopMinute))
+    {
+        for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+            if(positionInfo.SelectByIndex(i) && (positionInfo.Magic() == MAGIC_S1 || positionInfo.Magic() == MAGIC_S2 || positionInfo.Magic() == MAGIC_S3))
+            {
+                trade.PositionClose(positionInfo.Ticket());
+            }
+        }
+    }
+}
 //+------------------------------------------------------------------+
 bool IsTimeAllowed()
 {
     if(!EnableTimeFilter) return true;
-
     MqlDateTime time_struct;
     TimeCurrent(time_struct);
     int current_hour = time_struct.hour;
 
-    if(StartTime < EndTime) // Normal case, e.g., 7 to 16
-    {
-        return (current_hour >= StartTime && current_hour < EndTime);
-    }
-    else // Overnight case, e.g., 22 to 5
-    {
-        return (current_hour >= StartTime || current_hour < EndTime);
-    }
+    if(StartTime < EndTime) return (current_hour >= StartTime && current_hour < EndTime);
+    else return (current_hour >= StartTime || current_hour < EndTime);
 }
-
+//+------------------------------------------------------------------+
 bool IsVolatilityAllowed()
 {
     if(!EnableAtrFilter) return true;
-
     int atr_handle = iATR(_Symbol, PERIOD_D1, AtrFilterPeriod);
     double atr_buffer[];
-    if(CopyBuffer(atr_handle, 0, 0, 1, atr_buffer) < 1)
-    {
-        printf("ATR Filter: Could not get ATR value. Filter bypassed.");
-        return true;
-    }
-    double current_atr = atr_buffer[0];
-    symbolInfo.Refresh();
-    double atr_in_pips = current_atr / symbolInfo.Pip();
+    if(CopyBuffer(atr_handle, 0, 0, 1, atr_buffer) < 1) return true;
 
-    if(atr_in_pips < MinAtrPips)
-    {
-        //printf("ATR Filter: Volatility too low (%f pips). Trading paused.", atr_in_pips);
-        return false;
-    }
-    if(atr_in_pips > MaxAtrPips)
-    {
-        //printf("ATR Filter: Volatility too high (%f pips). Trading paused.", atr_in_pips);
-        return false;
-    }
+    symbolInfo.Refresh();
+    double atr_in_pips = atr_buffer[0] / symbolInfo.Pip();
+
+    if(atr_in_pips < MinAtrPips || atr_in_pips > MaxAtrPips) return false;
 
     return true;
 }
 
 //+------------------------------------------------------------------+
-//| Strategy 1: Market Structure & Breakout Trading                  |
+//|              S T R A T E G Y   F U N C T I O N S                 |
 //+------------------------------------------------------------------+
 void CheckStrategy1()
 {
-    // This function checks for breakout opportunities from the previous day's range.
-    // It first checks for a long setup (breakout above PDH). If a trade is placed, it returns.
-    // If no long trade is placed, it then proceeds to check for a short setup (breakout below PDL).
-    // This sequential check is the intended logic.
+    // This strategy runs on every tick to catch breakouts in real-time.
+    if(PositionSelectByMagic(_Symbol, MAGIC_S1)) return; // Position already open for this strategy
 
-    if(PositionSelectByMagic(_Symbol, MAGIC_S1) || OrderSelectByMagic(_Symbol, MAGIC_S1)) return;
+    // --- 1. Get Key Levels ---
+    static double pdh = 0, pdl = 0;
+    static datetime last_levels_update = 0;
+    datetime current_day = (datetime)SeriesInfoInteger(_Symbol, PERIOD_D1, SERIES_LASTBAR_DATE);
 
-    double pdh_arr[], pdl_arr[];
-    if(CopyHigh(_Symbol, PERIOD_D1, 1, 1, pdh_arr) < 1 || CopyLow(_Symbol, PERIOD_D1, 1, 1, pdl_arr) < 1) return;
-    double pdh = pdh_arr[0];
-    double pdl = pdl_arr[0];
-
-    MqlRates rates[];
-    if(CopyRates(_Symbol, _Period, 1, S1_ConsolidationBars, rates) < S1_ConsolidationBars) return;
-
-    symbolInfo.Refresh();
-    double pip_size = symbolInfo.Pip();
-
-    bool long_consolidation = true;
-    for(int i = 0; i < S1_ConsolidationBars; i++)
+    // Update levels once per day
+    if(current_day != last_levels_update)
     {
-        if(rates[i].high >= pdh) { long_consolidation = false; break; }
+        pdh = iHigh(_Symbol, PERIOD_D1, 1);
+        pdl = iLow(_Symbol, PERIOD_D1, 1);
+        last_levels_update = current_day;
+        if(pdh == 0 || pdl == 0) return; // Not enough history yet
     }
 
-    if(long_consolidation)
-    {
-        double entry_price = pdh + S1_BuyStopPips * pip_size;
-        entry_price = NormalizeDouble(entry_price, (int)symbolInfo.Digits());
-        double stop_loss = pdl;
-        double take_profit = entry_price + (entry_price - stop_loss) * S1_RR_Ratio;
-        take_profit = NormalizeDouble(take_profit, (int)symbolInfo.Digits());
+    if(pdh == 0 || pdl == 0) return; // Levels not initialized
 
-        double lots = CalculateLotSize(entry_price, stop_loss);
-        if(lots > 0)
-        {
-            trade.SetExpertMagicNumber(MAGIC_S1);
-            trade.BuyStop(lots, entry_price, _Symbol, stop_loss, take_profit, ORDER_TIME_GTC, 0, "S1 BuyStop");
-        }
+    // --- 2. Check for Breakout ---
+    symbolInfo.RefreshRates();
+    double ask = symbolInfo.Ask();
+    double bid = symbolInfo.Bid();
+
+    static double prev_ask = 0;
+    static double prev_bid = 0;
+
+    // Ensure we have previous tick prices to detect a cross
+    if(prev_ask == 0 || prev_bid == 0)
+    {
+        prev_ask = ask;
+        prev_bid = bid;
         return;
     }
 
-    bool short_consolidation = true;
-    for(int i = 0; i < S1_ConsolidationBars; i++)
+    // --- 3. Long Breakout Logic ---
+    if(ask > pdh && prev_ask <= pdh) // Price just crossed above PDH
     {
-        if(rates[i].low <= pdl) { short_consolidation = false; break; }
-    }
-
-    if(short_consolidation)
-    {
-        double entry_price = pdl - S1_SellStopPips * pip_size;
-        entry_price = NormalizeDouble(entry_price, (int)symbolInfo.Digits());
-        double stop_loss = pdh;
-        double take_profit = entry_price - (stop_loss - entry_price) * S1_RR_Ratio;
-        take_profit = NormalizeDouble(take_profit, (int)symbolInfo.Digits());
-
-        double lots = CalculateLotSize(entry_price, stop_loss);
-        if(lots > 0)
+        // --- 4. Volume Confirmation ---
+        long volume_hist[];
+        if(CopyRealVolume(_Symbol, _Period, 0, S1_AvgVolumePeriod + 1, volume_hist) > S1_AvgVolumePeriod)
         {
-            trade.SetExpertMagicNumber(MAGIC_S1);
-            trade.SellStop(lots, entry_price, _Symbol, stop_loss, take_profit, ORDER_TIME_GTC, 0, "S1 SellStop");
+            long current_volume = volume_hist[S1_AvgVolumePeriod];
+            long avg_volume = 0;
+            for(int i=0; i<S1_AvgVolumePeriod; i++) avg_volume += volume_hist[i];
+            avg_volume /= S1_AvgVolumePeriod;
+
+            if(current_volume > avg_volume * S1_VolumeMultiplier)
+            {
+                // --- 5. Execute Trade ---
+                double stop_loss = pdl;
+                double take_profit = ask + (ask - stop_loss) * S1_RR_Ratio;
+                double lots = CalculateLotSize(stop_loss);
+
+                if(lots > 0)
+                {
+                    trade.SetExpertMagicNumber(MAGIC_S1);
+                    trade.Buy(lots, _Symbol, ask, stop_loss, take_profit, "S1 Buy");
+                }
+            }
         }
-        return;
     }
+
+    // --- 3. Short Breakout Logic ---
+    if(bid < pdl && prev_bid >= pdl) // Price just crossed below PDL
+    {
+        // --- 4. Volume Confirmation ---
+        long volume_hist[];
+        if(CopyRealVolume(_Symbol, _Period, 0, S1_AvgVolumePeriod + 1, volume_hist) > S1_AvgVolumePeriod)
+        {
+            long current_volume = volume_hist[S1_AvgVolumePeriod];
+            long avg_volume = 0;
+            for(int i=0; i<S1_AvgVolumePeriod; i++) avg_volume += volume_hist[i];
+            avg_volume /= S1_AvgVolumePeriod;
+
+            if(current_volume > avg_volume * S1_VolumeMultiplier)
+            {
+                // --- 5. Execute Trade ---
+                double stop_loss = pdh;
+                double take_profit = bid - (stop_loss - bid) * S1_RR_Ratio;
+                double lots = CalculateLotSize(stop_loss);
+
+                if(lots > 0)
+                {
+                    trade.SetExpertMagicNumber(MAGIC_S1);
+                    trade.Sell(lots, _Symbol, bid, stop_loss, take_profit, "S1 Sell");
+                }
+            }
+        }
+    }
+
+    // Update previous prices for the next tick
+    prev_ask = ask;
+    prev_bid = bid;
 }
-
-
-//+------------------------------------------------------------------+
-//| Strategy 2: Momentum Divergence with Macro-Filter                |
 //+------------------------------------------------------------------+
 void CheckStrategy2()
 {
     if(PositionSelectByMagic(_Symbol, MAGIC_S2)) return;
 
-    int divergence_pivot_shift = findDivergence(S2_DivergenceLookback, 1);
+    int divergence_pivot_shift = findDivergence(1); // Check from the last closed bar
     if(divergence_pivot_shift == 0) return;
 
     if(!CheckDXYFilter(divergence_pivot_shift)) return;
 
-    if(divergence_pivot_shift > 0)
+    if(divergence_pivot_shift > 0) // Bullish
     {
         double stop_loss = iLow(_Symbol, _Period, divergence_pivot_shift) - S2_SL_Pips_Buffer * symbolInfo.Pip();
-        stop_loss = NormalizeDouble(stop_loss, (int)symbolInfo.Digits());
-        symbolInfo.RefreshRates();
-        double entry_price = symbolInfo.Ask();
-
-        double lots = CalculateLotSize(entry_price, stop_loss);
+        double lots = CalculateLotSize(stop_loss);
         if(lots > 0)
         {
             trade.SetExpertMagicNumber(MAGIC_S2);
-            trade.Buy(lots, _Symbol, entry_price, stop_loss, 0, "S2 Buy");
+            trade.Buy(lots, _Symbol, 0, stop_loss, 0, "S2 Buy");
         }
     }
-    else
+    else // Bearish
     {
         double stop_loss = iHigh(_Symbol, _Period, MathAbs(divergence_pivot_shift)) + S2_SL_Pips_Buffer * symbolInfo.Pip();
-        stop_loss = NormalizeDouble(stop_loss, (int)symbolInfo.Digits());
-        symbolInfo.RefreshRates();
-        double entry_price = symbolInfo.Bid();
-
-        double lots = CalculateLotSize(entry_price, stop_loss);
+        double lots = CalculateLotSize(stop_loss);
         if(lots > 0)
         {
             trade.SetExpertMagicNumber(MAGIC_S2);
-            trade.Sell(lots, _Symbol, entry_price, stop_loss, 0, "S2 Sell");
+            trade.Sell(lots, _Symbol, 0, stop_loss, 0, "S2 Sell");
         }
     }
 }
-
-// Returns shift of the second pivot point (>0 for bullish, <0 for bearish, 0 for none)
-int findDivergence(int lookback, int start_shift)
-{
-    // Note on Logic: This is a simplified divergence detection function. It uses iLowest/iHighest
-    // to find basic price pivots and compares them with RSI values at the same bar.
-    // A more advanced implementation could use more robust pivot detection (e.g., via the
-    // ZigZag indicator) or more complex pattern validation. This version prioritizes a
-    // non-repainting signal based on closed bars.
-
-    double rsi_buffer[];
-    int rsi_handle = iRSI(_Symbol, _Period, S2_RSI_Period, PRICE_CLOSE);
-    if(CopyBuffer(rsi_handle, 0, start_shift, lookback, rsi_buffer) < lookback) return 0;
-
-    int p2_lookback = lookback / 3;
-    int p2_shift = iLowest(_Symbol, _Period, MODE_LOW, p2_lookback, start_shift);
-    int p1_lookback = lookback - (p2_shift - start_shift);
-    int p1_shift = iLowest(_Symbol, _Period, MODE_LOW, p1_lookback, p2_shift + 1);
-
-    if(p1_shift > 0 && p2_shift > 0)
-    {
-        double price1 = iLow(_Symbol, _Period, p1_shift);
-        double price2 = iLow(_Symbol, _Period, p2_shift);
-        double rsi1 = rsi_buffer[(int)(p1_shift - start_shift)];
-        double rsi2 = rsi_buffer[(int)(p2_shift - start_shift)];
-        if(price2 < price1 && rsi2 > rsi1) return p2_shift;
-    }
-
-    p2_shift = iHighest(_Symbol, _Period, MODE_HIGH, p2_lookback, start_shift);
-    p1_shift = iHighest(_Symbol, _Period, MODE_HIGH, p1_lookback, p2_shift + 1);
-
-    if(p1_shift > 0 && p2_shift > 0)
-    {
-        double price1 = iHigh(_Symbol, _Period, p1_shift);
-        double price2 = iHigh(_Symbol, _Period, p2_shift);
-        double rsi1 = rsi_buffer[(int)(p1_shift - start_shift)];
-        double rsi2 = rsi_buffer[(int)(p2_shift - start_shift)];
-        if(price2 > price1 && rsi2 < rsi1) return -p2_shift;
-    }
-    return 0;
-}
-
-bool CheckDXYFilter(int divergence_type)
-{
-    if(S2_DXY_Symbol == "") return true;
-    if(!SymbolSelect(S2_DXY_Symbol, true)) return true;
-
-    double dxy_ma_handle = iMA(S2_DXY_Symbol, S2_DXY_Timeframe, S2_DXY_MA_Period, 0, MODE_SMA, PRICE_CLOSE);
-    double dxy_ma_buffer[];
-    if(CopyBuffer(dxy_ma_handle, 0, 0, 1, dxy_ma_buffer) < 1) return true;
-
-    double dxy_close = iClose(S2_DXY_Symbol, S2_DXY_Timeframe, 0);
-    if(dxy_close == 0) return true;
-
-    bool dxy_trending_up = dxy_close > dxy_ma_buffer[0];
-    bool dxy_trending_down = dxy_close < dxy_ma_buffer[0];
-
-    if(divergence_type > 0) return dxy_trending_down;
-    else return dxy_trending_up;
-}
-
-//+------------------------------------------------------------------+
-//| Strategy 3: Volatility Squeeze Explosion                         |
 //+------------------------------------------------------------------+
 void CheckStrategy3()
 {
@@ -546,7 +416,6 @@ void CheckStrategy3()
 
     for(int i = 0; i < S3_BandWidth_MAPeriod; i++)
     {
-        // We look at the history from index 1 to 50 of the copied BB arrays
         if(hist_middle[i+1] != 0)
         {
             bandwidth_history[i] = (hist_upper[i+1] - hist_lower[i+1]) / hist_middle[i+1];
@@ -562,7 +431,6 @@ void CheckStrategy3()
     double current_bw = (hist_middle[0] != 0) ? (hist_upper[0] - hist_lower[0]) / hist_middle[0] : -1;
 
     // 4. Detect the Squeeze: The core requirement is that bandwidth "falls to a multi-day low".
-    // This is interpreted as the current bandwidth being at or very near the lowest point in the lookback period.
     // We use a small tolerance (1.05x) to avoid issues with floating point precision and to catch near-lows.
     if(current_bw < 0 || current_bw > (historical_low_bw * 1.05))
     {
@@ -581,13 +449,11 @@ void CheckStrategy3()
     if(close_price > hist_upper[0] && cci_val[0] > S3_CCI_Threshold)
     {
         double stop_loss = hist_lower[0];
-        symbolInfo.RefreshRates();
-        double entry_price = symbolInfo.Ask();
-        double lots = CalculateLotSize(entry_price, stop_loss);
+        double lots = CalculateLotSize(stop_loss);
         if(lots > 0)
         {
             trade.SetExpertMagicNumber(MAGIC_S3);
-            trade.Buy(lots, _Symbol, entry_price, stop_loss, 0, "S3 Buy");
+            trade.Buy(lots, _Symbol, 0, stop_loss, 0, "S3 Buy");
         }
         return;
     }
@@ -596,18 +462,16 @@ void CheckStrategy3()
     if(close_price < hist_lower[0] && cci_val[0] < -S3_CCI_Threshold)
     {
         double stop_loss = hist_upper[0];
-        symbolInfo.RefreshRates();
-        double entry_price = symbolInfo.Bid();
-        double lots = CalculateLotSize(entry_price, stop_loss);
+        double lots = CalculateLotSize(stop_loss);
         if(lots > 0)
         {
             trade.SetExpertMagicNumber(MAGIC_S3);
-            trade.Sell(lots, _Symbol, entry_price, stop_loss, 0, "S3 Sell");
+            trade.Sell(lots, _Symbol, 0, stop_loss, 0, "S3 Sell");
         }
         return;
     }
 }
-
+//+------------------------------------------------------------------+
 void ManageStrategy3_TSL()
 {
     if(!PositionSelectByMagic(_Symbol, MAGIC_S3)) return;
@@ -650,50 +514,59 @@ void ManageStrategy3_TSL()
     }
 }
 //+------------------------------------------------------------------+
-//| Helper Functions                                                 |
+//|                  H E L P E R   F U N C T I O N S                 |
 //+------------------------------------------------------------------+
-void CancelPendingOrders(int magic)
+int findDivergence(int start_shift)
 {
-    for(int i = OrdersTotal() - 1; i >= 0; i--)
-    {
-        ulong ticket = OrderGetTicket(i);
-        if(orderInfo.Select(ticket))
-        {
-            if(orderInfo.Symbol() == _Symbol && orderInfo.Magic() == magic)
-            {
-                trade.OrderDelete(ticket);
-            }
-        }
-    }
-}
+    // Note on Logic: This is a simplified divergence detection function.
+    double rsi_buffer[];
+    int rsi_handle = iRSI(_Symbol, _Period, S2_RSI_Period, PRICE_CLOSE);
+    if(CopyBuffer(rsi_handle, 0, start_shift, S2_DivergenceLookback, rsi_buffer) < S2_DivergenceLookback) return 0;
 
-bool OrderSelectByMagic(string symbol, int magic)
-{
-    for(int i = OrdersTotal() - 1; i >= 0; i--)
-    {
-        if(orderInfo.Select(OrderGetTicket(i)))
-        {
-            if(orderInfo.Symbol() == symbol && orderInfo.Magic() == magic)
-            {
-                return true;
-            }
-        }
-    }
-    return false;
-}
+    int p2_lookback = S2_DivergenceLookback / 3;
+    int p2_shift = iLowest(_Symbol, _Period, MODE_LOW, p2_lookback, start_shift);
+    int p1_lookback = S2_DivergenceLookback - (p2_shift - start_shift);
+    int p1_shift = iLowest(_Symbol, _Period, MODE_LOW, p1_lookback, p2_shift + 1);
 
-bool PositionSelectByMagic(string symbol, int magic)
-{
-    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    if(p1_shift > 0 && p2_shift > 0)
     {
-        if(positionInfo.SelectByIndex(i))
-        {
-            if(positionInfo.Symbol() == symbol && positionInfo.Magic() == magic)
-            {
-                return true;
-            }
-        }
+        double price1 = iLow(_Symbol, _Period, p1_shift);
+        double price2 = iLow(_Symbol, _Period, p2_shift);
+        double rsi1 = rsi_buffer[(int)(p1_shift - start_shift)];
+        double rsi2 = rsi_buffer[(int)(p2_shift - start_shift)];
+        if(price2 < price1 && rsi2 > rsi1) return p2_shift;
     }
-    return false;
+
+    p2_shift = iHighest(_Symbol, _Period, MODE_HIGH, p2_lookback, start_shift);
+    p1_shift = iHighest(_Symbol, _Period, MODE_HIGH, p1_lookback, p2_shift + 1);
+
+    if(p1_shift > 0 && p2_shift > 0)
+    {
+        double price1 = iHigh(_Symbol, _Period, p1_shift);
+        double price2 = iHigh(_Symbol, _Period, p2_shift);
+        double rsi1 = rsi_buffer[(int)(p1_shift - start_shift)];
+        double rsi2 = rsi_buffer[(int)(p2_shift - start_shift)];
+        if(price2 > price1 && rsi2 < rsi1) return -p2_shift;
+    }
+    return 0;
+}
+//+------------------------------------------------------------------+
+bool CheckDXYFilter(int divergence_type)
+{
+    if(S2_DXY_Symbol == "") return true;
+    if(!SymbolSelect(S2_DXY_Symbol, true)) return true;
+
+    double dxy_ma_buffer[];
+    int dxy_ma_handle = iMA(S2_DXY_Symbol, S2_DXY_Timeframe, S2_DXY_MA_Period, 0, MODE_SMA, PRICE_CLOSE);
+    if(CopyBuffer(dxy_ma_handle, 0, 0, 1, dxy_ma_buffer) < 1) return true;
+
+    double dxy_close = iClose(S2_DXY_Symbol, S2_DXY_Timeframe, 0);
+    if(dxy_close == 0) return true;
+
+    bool dxy_trending_up = dxy_close > dxy_ma_buffer[0];
+    bool dxy_trending_down = dxy_close < dxy_ma_buffer[0];
+
+    if(divergence_type > 0) return dxy_trending_down;
+    else return dxy_trending_up;
 }
 //+------------------------------------------------------------------+
