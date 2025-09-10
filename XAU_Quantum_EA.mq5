@@ -162,7 +162,7 @@ void OnTick()
 
    //--- Check for new bar
    static datetime lastBarTime = 0;
-   datetime currentBarTime = (datetime)SeriesInfoInteger(_Symbol, _Period, SERIES_LAST_BAR_TIME);
+   datetime currentBarTime = (datetime)SeriesInfoInteger(_Symbol, _Period, SERIES_LASTBAR_DATE);
    if(currentBarTime == lastBarTime)
      {
       return; // Not a new bar, exit
@@ -231,7 +231,7 @@ void ManageEquityTrail()
                     int magic = (int)positionInfo.Magic();
                     if(magic == MAGIC_S1 || magic == MAGIC_S2 || magic == MAGIC_S3)
                     {
-                        trade.PositionClose(positionInfo.TicketNumber());
+                        trade.PositionClose(positionInfo.Ticket());
                     }
                 }
             }
@@ -242,6 +242,7 @@ double CalculateLotSize(double entry_price, double stop_loss_price)
 {
     if(!EnableDynamicLots) return 0.01;
 
+    accountInfo.Refresh();
     double account_balance = accountInfo.Balance();
     double risk_amount = account_balance * (RiskPercent / 100.0);
     double sl_distance = MathAbs(entry_price - stop_loss_price);
@@ -291,7 +292,7 @@ void CheckTimeStop()
                 int magic = (int)positionInfo.Magic();
                 if(magic == MAGIC_S1 || magic == MAGIC_S2 || magic == MAGIC_S3)
                 {
-                    trade.PositionClose(positionInfo.TicketNumber());
+                    trade.PositionClose(positionInfo.Ticket());
                 }
             }
         }
@@ -325,12 +326,13 @@ bool IsVolatilityAllowed()
 
     int atr_handle = iATR(_Symbol, PERIOD_D1, AtrFilterPeriod);
     double atr_buffer[];
-    if(CopyBuffer(atr_handle, 0, 1, 1, atr_buffer) < 1)
+    if(CopyBuffer(atr_handle, 0, 0, 1, atr_buffer) < 1)
     {
         printf("ATR Filter: Could not get ATR value. Filter bypassed.");
         return true;
     }
     double current_atr = atr_buffer[0];
+    symbolInfo.Refresh();
     double atr_in_pips = current_atr / symbolInfo.Pip();
 
     if(atr_in_pips < MinAtrPips)
@@ -362,6 +364,7 @@ void CheckStrategy1()
     MqlRates rates[];
     if(CopyRates(_Symbol, _Period, 1, S1_ConsolidationBars, rates) < S1_ConsolidationBars) return;
 
+    symbolInfo.Refresh();
     double pip_size = symbolInfo.Pip();
 
     bool long_consolidation = true;
@@ -428,26 +431,28 @@ void CheckStrategy2()
     {
         double stop_loss = iLow(_Symbol, _Period, divergence_pivot_shift) - S2_SL_Pips_Buffer * symbolInfo.Pip();
         stop_loss = NormalizeDouble(stop_loss, (int)symbolInfo.Digits());
-        double entry_price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+        symbolInfo.RefreshRates();
+        double entry_price = symbolInfo.Ask();
 
         double lots = CalculateLotSize(entry_price, stop_loss);
         if(lots > 0)
         {
             trade.SetExpertMagicNumber(MAGIC_S2);
-            trade.Buy(lots, _Symbol, 0, stop_loss, 0, "S2 Buy");
+            trade.Buy(lots, _Symbol, entry_price, stop_loss, 0, "S2 Buy");
         }
     }
     else
     {
         double stop_loss = iHigh(_Symbol, _Period, MathAbs(divergence_pivot_shift)) + S2_SL_Pips_Buffer * symbolInfo.Pip();
         stop_loss = NormalizeDouble(stop_loss, (int)symbolInfo.Digits());
-        double entry_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+        symbolInfo.RefreshRates();
+        double entry_price = symbolInfo.Bid();
 
         double lots = CalculateLotSize(entry_price, stop_loss);
         if(lots > 0)
         {
             trade.SetExpertMagicNumber(MAGIC_S2);
-            trade.Sell(lots, _Symbol, 0, stop_loss, 0, "S2 Sell");
+            trade.Sell(lots, _Symbol, entry_price, stop_loss, 0, "S2 Sell");
         }
     }
 }
@@ -457,12 +462,12 @@ int findDivergence(int lookback, int start_shift)
 {
     double rsi_buffer[];
     int rsi_handle = iRSI(_Symbol, _Period, S2_RSI_Period, PRICE_CLOSE);
-    if(CopyBuffer(rsi_handle, start_shift, lookback, rsi_buffer) < lookback) return 0;
+    if(CopyBuffer(rsi_handle, 0, start_shift, lookback, rsi_buffer) < lookback) return 0;
 
     int p2_lookback = lookback / 3;
-    int p2_shift = iLowest(_Symbol, _Period, p2_lookback, start_shift);
+    int p2_shift = iLowest(_Symbol, _Period, MODE_LOW, p2_lookback, start_shift);
     int p1_lookback = lookback - (p2_shift - start_shift);
-    int p1_shift = iLowest(_Symbol, _Period, p1_lookback, p2_shift + 1);
+    int p1_shift = iLowest(_Symbol, _Period, MODE_LOW, p1_lookback, p2_shift + 1);
 
     if(p1_shift > 0 && p2_shift > 0)
     {
@@ -473,8 +478,8 @@ int findDivergence(int lookback, int start_shift)
         if(price2 < price1 && rsi2 > rsi1) return p2_shift;
     }
 
-    p2_shift = iHighest(_Symbol, _Period, p2_lookback, start_shift);
-    p1_shift = iHighest(_Symbol, _Period, p1_lookback, p2_shift + 1);
+    p2_shift = iHighest(_Symbol, _Period, MODE_HIGH, p2_lookback, start_shift);
+    p1_shift = iHighest(_Symbol, _Period, MODE_HIGH, p1_lookback, p2_shift + 1);
 
     if(p1_shift > 0 && p2_shift > 0)
     {
@@ -494,7 +499,7 @@ bool CheckDXYFilter(int divergence_type)
 
     double dxy_ma_handle = iMA(S2_DXY_Symbol, S2_DXY_Timeframe, S2_DXY_MA_Period, 0, MODE_SMA, PRICE_CLOSE);
     double dxy_ma_buffer[];
-    if(CopyBuffer(dxy_ma_handle, 0, 1, dxy_ma_buffer) < 1) return true;
+    if(CopyBuffer(dxy_ma_handle, 0, 0, 1, dxy_ma_buffer) < 1) return true;
 
     double dxy_close = iClose(S2_DXY_Symbol, S2_DXY_Timeframe, 0);
     if(dxy_close == 0) return true;
@@ -550,12 +555,13 @@ void CheckStrategy3()
     if(close_price > upper_bb[0] && cci_val[0] > S3_CCI_Threshold)
     {
         double stop_loss = lower_bb[0];
-        double entry_price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+        symbolInfo.RefreshRates();
+        double entry_price = symbolInfo.Ask();
         double lots = CalculateLotSize(entry_price, stop_loss);
         if(lots > 0)
         {
             trade.SetExpertMagicNumber(MAGIC_S3);
-            trade.Buy(lots, _Symbol, 0, stop_loss, 0, "S3 Buy");
+            trade.Buy(lots, _Symbol, entry_price, stop_loss, 0, "S3 Buy");
         }
         return;
     }
@@ -563,12 +569,13 @@ void CheckStrategy3()
     if(close_price < lower_bb[0] && cci_val[0] < -S3_CCI_Threshold)
     {
         double stop_loss = upper_bb[0];
-        double entry_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+        symbolInfo.RefreshRates();
+        double entry_price = symbolInfo.Bid();
         double lots = CalculateLotSize(entry_price, stop_loss);
         if(lots > 0)
         {
             trade.SetExpertMagicNumber(MAGIC_S3);
-            trade.Sell(lots, _Symbol, 0, stop_loss, 0, "S3 Sell");
+            trade.Sell(lots, _Symbol, entry_price, stop_loss, 0, "S3 Sell");
         }
         return;
     }
@@ -578,24 +585,25 @@ void ManageStrategy3_TSL()
 {
     if(!PositionSelectByMagic(_Symbol, MAGIC_S3)) return;
 
-    long pos_ticket = positionInfo.TicketNumber();
+    long pos_ticket = positionInfo.Ticket();
     long pos_type = positionInfo.PositionType();
     double current_sl = positionInfo.StopLoss();
 
     int atr_handle = iATR(_Symbol, _Period, S3_ATR_Period);
     double atr_buffer[];
-    if(CopyBuffer(atr_handle, 0, 1, 1, atr_buffer) < 1) return;
+    if(CopyBuffer(atr_handle, 0, 0, 1, atr_buffer) < 1) return;
     double atr_value = atr_buffer[0];
 
     double new_sl = 0;
 
+    symbolInfo.RefreshRates();
     if(pos_type == POSITION_TYPE_BUY)
     {
-        new_sl = _Symbol.Bid() - S3_ATR_Multiplier * atr_value;
+        new_sl = symbolInfo.Bid() - S3_ATR_Multiplier * atr_value;
         new_sl = NormalizeDouble(new_sl, (int)symbolInfo.Digits());
         if(current_sl == 0 || new_sl > current_sl)
         {
-            if(new_sl < _Symbol.Bid())
+            if(new_sl < symbolInfo.Bid())
             {
                 trade.PositionModify(pos_ticket, new_sl, positionInfo.TakeProfit());
             }
@@ -603,11 +611,11 @@ void ManageStrategy3_TSL()
     }
     else if(pos_type == POSITION_TYPE_SELL)
     {
-        new_sl = _Symbol.Ask() + S3_ATR_Multiplier * atr_value;
+        new_sl = symbolInfo.Ask() + S3_ATR_Multiplier * atr_value;
         new_sl = NormalizeDouble(new_sl, (int)symbolInfo.Digits());
         if(current_sl == 0 || new_sl < current_sl)
         {
-            if(new_sl > _Symbol.Ask())
+            if(new_sl > symbolInfo.Ask())
             {
                 trade.PositionModify(pos_ticket, new_sl, positionInfo.TakeProfit());
             }
