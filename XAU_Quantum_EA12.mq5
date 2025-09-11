@@ -1,5 +1,5 @@
 #property copyright "XAU_Quantum_EA"
-#property version   "1.3.1"
+#property version   "1.300"
 #property strict
 
 // ========================= Inputs =========================
@@ -537,11 +537,16 @@ SqueezeSignal Strategy3_Squeeze()
 }
 
 // ========================= Multi-TP & Breakeven helpers =========================
+string ULongToStr(ulong v)
+{
+	return StringFormat("%I64u", v);
+}
+
 string GenerateTradeId(const string strategyTag)
 {
 	ulong ms = GetMicrosecondCount();
 	string ts = IntegerToString((int)TimeCurrent());
-	return strategyTag + "#" + ts + "-" + ULongToString(ms);
+	return strategyTag + "#" + ts + "-" + ULongToStr(ms);
 }
 
 bool ModifySLForTicket(ulong ticket, double newSL)
@@ -557,7 +562,7 @@ bool ModifySLForTicket(ulong ticket, double newSL)
 	req.type_time   = ORDER_TIME_GTC;
 	req.type_filling= ORDER_FILLING_FOK;
 	bool ok = OrderSend(req, res);
-	if(!ok) Print("Modify SL failed ret=", res.retcode, " err=", GetLastError(), " ticket=", ULongToString(ticket));
+	if(!ok) Print("Modify SL failed ret=", res.retcode, " err=", GetLastError(), " ticket=", ULongToStr(ticket));
 	return ok;
 }
 
@@ -757,7 +762,7 @@ void UpdateChandelierTrailForSymbol()
 		req.type_filling= ORDER_FILLING_FOK;
 
 		if(!OrderSend(req, res))
-			Print("Chandelier trail modify failed. ticket=", ULongToString(ticket), " err=", GetLastError(), " ret=", res.retcode);
+			Print("Chandelier trail modify failed. ticket=", ULongToStr(ticket), " err=", GetLastError(), " ret=", res.retcode);
 	}
 }
 
@@ -794,17 +799,17 @@ void CloseAllPositionsForSymbol()
 		req.price  = price;
 		req.deviation = (int)InpSlippagePoints;
 		bool ok = OrderSend(req, res);
-		if(!ok) Print("Close failed ret=", res.retcode, " err=", GetLastError(), " ticket=", ULongToString(ticket));
+		if(!ok) Print("Close failed ret=", res.retcode, " err=", GetLastError(), " ticket=", ULongToStr(ticket));
 	}
 }
 
 // ========================= Lifecycle =========================
 int OnInit()
 {
-	Print("XAU_Quantum_EA v1.3.1 initialized on ", Symbol());
+	Print("XAU_Quantum_EA v1.300 initialized on ", Symbol());
 	g_equityPeak = AccountInfoDouble(ACCOUNT_EQUITY);
 
-	// Create indicator handles (note: bands_shift is int 0)
+	// Create indicator handles (bands_shift is int 0)
 	hATR_D1    = iATR(Symbol(), InpATR_TF, 14);
 	hATR_Trail = iATR(Symbol(), InpTrailTF, InpChandATRPeriod);
 	hRSI       = iRSI(Symbol(), InpSignalTF, InpRSIPeriod, PRICE_CLOSE);
