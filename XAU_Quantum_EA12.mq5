@@ -1,5 +1,3 @@
-### XAU_Quantum_EA.mq5 (latest)
-```cpp
 #property copyright "XAU_Quantum_EA"
 #property version   "1.3.1"
 #property strict
@@ -931,4 +929,3 @@ void OnTick()
 		}
 	}
 }
-```
