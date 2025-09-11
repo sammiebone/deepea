@@ -1,0 +1,36 @@
+possible loss of data due to type conversion from 'long' to 'int'	XAU_Quantum_EA.mq5	74	8
+possible loss of data due to type conversion from 'long' to 'int'	XAU_Quantum_EA.mq5	75	8
+wrong parameters count	XAU_Quantum_EA.mq5	107	6
+   built-in: int iATR(const string,ENUM_TIMEFRAMES,int)	XAU_Quantum_EA.mq5	107	6
+wrong parameters count	XAU_Quantum_EA.mq5	244	15
+wrong parameters count	XAU_Quantum_EA.mq5	244	15
+could be one of 2 function(s)	XAU_Quantum_EA.mq5	244	15
+   built-in: int WebRequest(const string,const string,const string,const string,int,const uchar&[],int,uchar&[],string&)	XAU_Quantum_EA.mq5	244	15
+   built-in: int WebRequest(const string,const string,const string,int,const uchar&[],uchar&[],string&)	XAU_Quantum_EA.mq5	244	15
+implicit conversion from 'bool' to 'string'	XAU_Quantum_EA.mq5	251	9
+wrong parameters count	XAU_Quantum_EA.mq5	391	42
+   built-in: int iRSI(const string,ENUM_TIMEFRAMES,int,int)	XAU_Quantum_EA.mq5	391	42
+wrong parameters count	XAU_Quantum_EA.mq5	392	54
+   built-in: int iMA(const string,ENUM_TIMEFRAMES,int,int,ENUM_MA_METHOD,int)	XAU_Quantum_EA.mq5	392	54
+undeclared identifier	XAU_Quantum_EA.mq5	459	76
+wrong parameters count	XAU_Quantum_EA.mq5	459	17
+   built-in: int iBands(const string,ENUM_TIMEFRAMES,int,int,double,int)	XAU_Quantum_EA.mq5	459	17
+undeclared identifier	XAU_Quantum_EA.mq5	460	76
+wrong parameters count	XAU_Quantum_EA.mq5	460	17
+   built-in: int iBands(const string,ENUM_TIMEFRAMES,int,int,double,int)	XAU_Quantum_EA.mq5	460	17
+undeclared identifier	XAU_Quantum_EA.mq5	461	76
+wrong parameters count	XAU_Quantum_EA.mq5	461	17
+   built-in: int iBands(const string,ENUM_TIMEFRAMES,int,int,double,int)	XAU_Quantum_EA.mq5	461	17
+wrong parameters count	XAU_Quantum_EA.mq5	472	39
+   built-in: int iCCI(const string,ENUM_TIMEFRAMES,int,int)	XAU_Quantum_EA.mq5	472	39
+undeclared identifier	XAU_Quantum_EA.mq5	490	89
+wrong parameters count	XAU_Quantum_EA.mq5	490	18
+   built-in: int iBands(const string,ENUM_TIMEFRAMES,int,int,double,int)	XAU_Quantum_EA.mq5	490	18
+undeclared identifier	XAU_Quantum_EA.mq5	491	89
+wrong parameters count	XAU_Quantum_EA.mq5	491	18
+   built-in: int iBands(const string,ENUM_TIMEFRAMES,int,int,double,int)	XAU_Quantum_EA.mq5	491	18
+possible loss of data due to type conversion from 'ulong' to 'long'	XAU_Quantum_EA.mq5	518	10
+wrong parameters count	XAU_Quantum_EA.mq5	681	15
+   built-in: int iATR(const string,ENUM_TIMEFRAMES,int)	XAU_Quantum_EA.mq5	681	15
+return value of 'OrderSend' should be checked	XAU_Quantum_EA.mq5	782	3
+17 errors, 5 warnings		17	5
