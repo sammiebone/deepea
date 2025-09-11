@@ -1,5 +1,7 @@
+### XAU_Quantum_EA.mq5 (latest)
+```cpp
 #property copyright "XAU_Quantum_EA"
-#property version   "1.3"
+#property version   "1.3.1"
 #property strict
 
 // ========================= Inputs =========================
@@ -73,7 +75,7 @@ int hATR_D1 = INVALID_HANDLE;
 int hATR_Trail = INVALID_HANDLE;
 int hRSI = INVALID_HANDLE;
 int hEMA = INVALID_HANDLE;
-int hBands = INVALID_HANDLE;      // buffer 0 MAIN, 1 UPPER, 2 LOWER
+int hBands = INVALID_HANDLE;      // 0 MAIN, 1 UPPER, 2 LOWER
 int hCCI = INVALID_HANDLE;
 int hZigZag = INVALID_HANDLE;
 
@@ -244,31 +246,11 @@ bool CopyShift(int handle, int buffer, int shift, double &val)
 	val = tmp[0]; return true;
 }
 
-// D1 ATR value
-bool GetATR_D1_Val(double &atr_out)
-{
-	return CopyOne(hATR_D1, 0, atr_out);
-}
+bool GetATR_D1_Val(double &atr_out) { return CopyOne(hATR_D1, 0, atr_out); }
+bool GetATR_Trail_Val(double &atr_out) { return CopyOne(hATR_Trail, 0, atr_out); }
+bool GetRSI_Shift(int shift, double &out) { return CopyShift(hRSI, 0, shift, out); }
+bool GetEMA_Shift(int shift, double &out) { return CopyShift(hEMA, 0, shift, out); }
 
-// Trail ATR (on InpTrailTF)
-bool GetATR_Trail_Val(double &atr_out)
-{
-	return CopyOne(hATR_Trail, 0, atr_out);
-}
-
-// RSI at shift
-bool GetRSI_Shift(int shift, double &out)
-{
-	return CopyShift(hRSI, 0, shift, out);
-}
-
-// EMA at shift
-bool GetEMA_Shift(int shift, double &out)
-{
-	return CopyShift(hEMA, 0, shift, out);
-}
-
-// Bands buffers at shift
 bool GetBandsAt(int shift, double &main, double &upper, double &lower)
 {
 	if(!CopyShift(hBands, 0, shift, main)) return false;
@@ -277,17 +259,8 @@ bool GetBandsAt(int shift, double &main, double &upper, double &lower)
 	return true;
 }
 
-// CCI at shift
-bool GetCCI_Shift(int shift, double &out)
-{
-	return CopyShift(hCCI, 0, shift, out);
-}
-
-// ZigZag buffer at shift (single buffer in standard ZigZag)
-bool GetZigZag_Shift(int shift, double &v)
-{
-	return CopyShift(hZigZag, 0, shift, v);
-}
+bool GetCCI_Shift(int shift, double &out) { return CopyShift(hCCI, 0, shift, out); }
+bool GetZigZag_Shift(int shift, double &v) { return CopyShift(hZigZag, 0, shift, v); }
 
 // ========================= Macro Filter =========================
 enum MacroTrend { MACRO_UNKNOWN=0, MACRO_UP=1, MACRO_DOWN=2 };
@@ -298,11 +271,8 @@ MacroTrend FetchMacroTrend(const string url)
 
 	uchar req_data[]; // empty body
 	uchar result[];
-	string headers;
-	int timeout = InpMacroTimeoutMs;
-
-	// Overload: WebRequest(method,url,headers,cookie,timeout,const uchar&[],data_size,uchar&[],string&)
-	int status = WebRequest("GET", url, "", "", timeout, req_data, 0, result, headers);
+	string result_headers;
+	int status = WebRequest("GET", url, "", "", InpMacroTimeoutMs, req_data, 0, result, result_headers);
 	if(status != 200)
 	{
 		Print("WebRequest status=", status, " url=", url);
@@ -310,8 +280,8 @@ MacroTrend FetchMacroTrend(const string url)
 	}
 	string body = CharArrayToString(result, 0, (int)ArraySize(result));
 	string low  = StringToLower(body);
-	if(StringFind(low, "trend") >= 0 && StringFind(low, "up") >= 0)   return MACRO_UP;
-	if(StringFind(low, "trend") >= 0 && StringFind(low, "down") >= 0) return MACRO_DOWN;
+	if(StringFind(low, "\"trend\"") >= 0 && StringFind(low, "up") >= 0)   return MACRO_UP;
+	if(StringFind(low, "\"trend\"") >= 0 && StringFind(low, "down") >= 0) return MACRO_DOWN;
 	return MACRO_UNKNOWN;
 }
 
@@ -530,7 +500,6 @@ SqueezeSignal Strategy3_Squeeze()
 	if(!BollingerAt(0, main0, up0, low0)) return s;
 	if(main0 == 0) return s;
 
-	// Bandwidth now and MA
 	double bw_now = (up0 - low0) / main0;
 	double bw_hist[];
 	ArrayResize(bw_hist, InpBBW_MA_Period);
@@ -572,8 +541,9 @@ SqueezeSignal Strategy3_Squeeze()
 // ========================= Multi-TP & Breakeven helpers =========================
 string GenerateTradeId(const string strategyTag)
 {
-	long ms = GetMicrosecondCount();
-	return strategyTag + "#" + IntegerToString((int)TimeCurrent()) + "-" + LongToString(ms);
+	ulong ms = GetMicrosecondCount();
+	string ts = IntegerToString((int)TimeCurrent());
+	return strategyTag + "#" + ts + "-" + ULongToString(ms);
 }
 
 bool ModifySLForTicket(ulong ticket, double newSL)
@@ -589,7 +559,7 @@ bool ModifySLForTicket(ulong ticket, double newSL)
 	req.type_time   = ORDER_TIME_GTC;
 	req.type_filling= ORDER_FILLING_FOK;
 	bool ok = OrderSend(req, res);
-	if(!ok) Print("Modify SL failed ret=", res.retcode, " err=", GetLastError());
+	if(!ok) Print("Modify SL failed ret=", res.retcode, " err=", GetLastError(), " ticket=", ULongToString(ticket));
 	return ok;
 }
 
@@ -726,7 +696,6 @@ void UpdateChandelierTrailForSymbol()
 
 	double atr; if(!GetATR_Trail_Val(atr)) return;
 
-	// Highest/Lowest on trail TF across lookback window
 	int idxHigh = iHighest(Symbol(), InpTrailTF, MODE_HIGH, InpChandLookback, 1);
 	int idxLow  = iLowest(Symbol(),  InpTrailTF, MODE_LOW,  InpChandLookback, 1);
 	if(idxHigh < 0 || idxLow < 0) return;
@@ -790,7 +759,7 @@ void UpdateChandelierTrailForSymbol()
 		req.type_filling= ORDER_FILLING_FOK;
 
 		if(!OrderSend(req, res))
-			Print("Chandelier trail modify failed. ticket=", ticket, " err=", GetLastError(), " ret=", res.retcode);
+			Print("Chandelier trail modify failed. ticket=", ULongToString(ticket), " err=", GetLastError(), " ret=", res.retcode);
 	}
 }
 
@@ -827,25 +796,24 @@ void CloseAllPositionsForSymbol()
 		req.price  = price;
 		req.deviation = (int)InpSlippagePoints;
 		bool ok = OrderSend(req, res);
-		if(!ok) Print("Close failed ret=", res.retcode, " err=", GetLastError());
+		if(!ok) Print("Close failed ret=", res.retcode, " err=", GetLastError(), " ticket=", ULongToString(ticket));
 	}
 }
 
 // ========================= Lifecycle =========================
 int OnInit()
 {
-	Print("XAU_Quantum_EA v1.3 initialized on ", Symbol());
+	Print("XAU_Quantum_EA v1.3.1 initialized on ", Symbol());
 	g_equityPeak = AccountInfoDouble(ACCOUNT_EQUITY);
 
-	// Create indicator handles
-	hATR_D1   = iATR(Symbol(), InpATR_TF, 14);
-	hATR_Trail= iATR(Symbol(), InpTrailTF, InpChandATRPeriod);
-	hRSI      = iRSI(Symbol(), InpSignalTF, InpRSIPeriod, PRICE_CLOSE);
-	hEMA      = iMA(Symbol(), InpSignalTF, InpEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
-	hBands    = iBands(Symbol(), InpSignalTF, InpBB_Period, InpBB_Dev, 0.0, PRICE_CLOSE);
-	hCCI      = iCCI(Symbol(), InpSignalTF, InpCCI_Period, PRICE_TYPICAL);
-	// Standard ZigZag inputs: Depth, Deviation, Backstep
-	hZigZag   = iCustom(Symbol(), InpSignalTF, "ZigZag", 12, 5, 3);
+	// Create indicator handles (note: bands_shift is int 0)
+	hATR_D1    = iATR(Symbol(), InpATR_TF, 14);
+	hATR_Trail = iATR(Symbol(), InpTrailTF, InpChandATRPeriod);
+	hRSI       = iRSI(Symbol(), InpSignalTF, InpRSIPeriod, PRICE_CLOSE);
+	hEMA       = iMA(Symbol(), InpSignalTF, InpEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
+	hBands     = iBands(Symbol(), InpSignalTF, InpBB_Period, InpBB_Dev, 0, PRICE_CLOSE);
+	hCCI       = iCCI(Symbol(), InpSignalTF, InpCCI_Period, PRICE_TYPICAL);
+	hZigZag    = iCustom(Symbol(), InpSignalTF, "ZigZag", 12, 5, 3);
 
 	if(hATR_D1==INVALID_HANDLE || hATR_Trail==INVALID_HANDLE || hRSI==INVALID_HANDLE ||
 	   hEMA==INVALID_HANDLE || hBands==INVALID_HANDLE || hCCI==INVALID_HANDLE || hZigZag==INVALID_HANDLE)
@@ -963,3 +931,4 @@ void OnTick()
 		}
 	}
 }
+```
