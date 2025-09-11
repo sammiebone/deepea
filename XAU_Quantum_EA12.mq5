@@ -1,5 +1,5 @@
 #property copyright "XAU_Quantum_EA"
-#property version   "1.2"
+#property version   "1.3"
 #property strict
 
 // ========================= Inputs =========================
@@ -17,48 +17,48 @@ input string InpForceFlatTime             = "17:00";   // GMT, close all
 input double InpATR_Min                   = 10.0;      // D1 ATR points (broker-scale)
 input double InpATR_Max                   = 60.0;
 
-input double InpRiskPerTradePercent       = 1.0;       // % of balance
-input double InpEquityMaxDDPercent        = 5.0;       // stop trading if equity drawdown exceeds this from peak
-input double InpSlippagePoints            = 20;        // slippage in points
+input double InpRiskPerTradePercent       = 1.0;
+input double InpEquityMaxDDPercent        = 5.0;
+input double InpSlippagePoints            = 20;
 
 // Strategy 1: Breakout
-input int    InpConsolidationBars         = 14;        // stricter (was 8)
-input double InpBreakoutBufferPoints      = 50;        // above PDH / below PDL
+input int    InpConsolidationBars         = 14;
+input double InpBreakoutBufferPoints      = 50;
 input int    InpVolumeMA_Period           = 20;
-input double InpVolumeBoostFactor         = 2.0;       // stricter (was 1.5)
+input double InpVolumeBoostFactor         = 2.0;
 
 // Strategy 2: Divergence + Macro
 input int    InpRSIPeriod                 = 21;
-input bool   InpUseMacroFilter            = false;     // enable macro filter
-input string InpMacroUrl_TIPS             = "";        // e.g., http://your-vps:8080/macro/tips
-input string InpMacroUrl_DXY              = "";        // optional fallback
+input bool   InpUseMacroFilter            = false;
+input string InpMacroUrl_TIPS             = "";
+input string InpMacroUrl_DXY              = "";
 input int    InpMacroTimeoutMs            = 1500;
-input int    InpEMA_Period                = 50;        // pullback MA
+input int    InpEMA_Period                = 50;
 
 // Strategy 3: Squeeze Explosion
 input int    InpBB_Period                 = 20;
 input double InpBB_Dev                    = 2.0;
-input int    InpBBW_MA_Period             = 50;        // bandwidth average
-input double InpBBW_RatioThreshold        = 0.2;       // current BW < threshold * MA(BW)
+input int    InpBBW_MA_Period             = 50;
+input double InpBBW_RatioThreshold        = 0.2;
 input int    InpCCI_Period                = 14;
-input int    InpCCI_Confirm               = 100;       // +100/-100
+input int    InpCCI_Confirm               = 100;
 
 // Trailing (Chandelier Exit)
 input bool   InpUseChandelierExit         = true;
-input ENUM_TIMEFRAMES InpTrailTF          = PERIOD_M15; // timeframe for trail calc
-input int    InpChandLookback             = 22;         // highest/lowest lookback
-input int    InpChandATRPeriod            = 22;         // ATR period
-input double InpChandATRMult              = 3.0;        // ATR multiple
-input double InpTrailActivatePts          = 0.0;        // start trailing after this profit (points). 0=immediate
+input ENUM_TIMEFRAMES InpTrailTF          = PERIOD_M15;
+input int    InpChandLookback             = 22;
+input int    InpChandATRPeriod            = 22;
+input double InpChandATRMult              = 3.0;
+input double InpTrailActivatePts          = 0.0;
 
 // Multi-TP + Breakeven
 input bool   InpUseMultiTP                = true;
-input double InpTP1_RR                    = 1.0;       // TP1 at 1R
-input double InpTP2_RR                    = 2.0;       // TP2 at 2R
-input double InpTP1_VolumeRatio           = 0.5;       // 50% volume to TP1
-input double InpTP2_VolumeRatio           = 0.5;       // 50% volume to TP2
-input double InpBreakevenOffsetPts        = 0.0;       // move SL to entry + offset after TP1
-input bool   InpEnforceBreakeven          = true;      // keep SL >= entry+offset (buy) or <= entry-offset (sell) once TP1 is hit
+input double InpTP1_RR                    = 1.0;
+input double InpTP2_RR                    = 2.0;
+input double InpTP1_VolumeRatio           = 0.5;
+input double InpTP2_VolumeRatio           = 0.5;
+input double InpBreakevenOffsetPts        = 0.0;
+input bool   InpEnforceBreakeven          = true;
 
 // Safety
 input int    InpMaxOpenTrades             = 2;
@@ -68,11 +68,20 @@ datetime g_lastSignalBarTime = 0;
 double   g_equityPeak        = 0.0;
 bool     g_tradingHalted     = false;
 
+// Indicator handles
+int hATR_D1 = INVALID_HANDLE;
+int hATR_Trail = INVALID_HANDLE;
+int hRSI = INVALID_HANDLE;
+int hEMA = INVALID_HANDLE;
+int hBands = INVALID_HANDLE;      // buffer 0 MAIN, 1 UPPER, 2 LOWER
+int hCCI = INVALID_HANDLE;
+int hZigZag = INVALID_HANDLE;
+
 // ========================= Helpers =========================
 bool ParseTimeHMGMT(const string hhmm, int &hour, int &minute)
 {
-	int h = StringToInteger(StringSubstr(hhmm, 0, 2));
-	int m = StringToInteger(StringSubstr(hhmm, 3, 2));
+	int h = (int)StringToInteger(StringSubstr(hhmm, 0, 2));
+	int m = (int)StringToInteger(StringSubstr(hhmm, 3, 2));
 	if(h < 0 || h > 23 || m < 0 || m > 59) return false;
 	hour = h; minute = m; return true;
 }
@@ -101,13 +110,6 @@ bool IsForceFlatTimeGMT(datetime now_gmt)
 	return (t.hour == fh && t.min >= fm && t.min < fm+5);
 }
 
-double GetATR(ENUM_TIMEFRAMES tf, int period)
-{
-	double atr[];
-	if(!iATR(Symbol(), tf, period, 0, atr)) return -1.0;
-	return atr[0];
-}
-
 bool NewBar(ENUM_TIMEFRAMES tf)
 {
 	static datetime lastTime = 0;
@@ -119,6 +121,12 @@ bool NewBar(ENUM_TIMEFRAMES tf)
 double NormalizeSLTPPrice(double price)
 {
 	return NormalizeDouble(price, (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS));
+}
+
+double PointsFromPrice(double price_diff)
+{
+	double pt = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
+	return price_diff / pt;
 }
 
 int CountOpenTradesForSymbol()
@@ -148,21 +156,9 @@ bool GetPrevDayHLC(double &pdh, double &pdl, double &pdc)
 	pdh = high; pdl = low; pdc = close; return true;
 }
 
-bool VolumeBreakoutConfirmed(int vol_ma_period, double factor)
-{
-	long volume = iVolume(Symbol(), InpSignalTF, 0);
-	double ma[];
-	if(!iMAOnArrayVolume(vol_ma_period, ma)) return false;
-	double avg = ma[0];
-	return (avg > 0 && (double)volume >= factor * avg);
-}
-
-// SMA of tick volumes (helper)
 bool iMAOnArrayVolume(int period, double &out[])
 {
 	ArraySetAsSeries(out, true);
-	double buffer[];
-	ArrayResize(buffer, period);
 	double sum = 0;
 	for(int i=0;i<period;i++)
 	{
@@ -175,10 +171,13 @@ bool iMAOnArrayVolume(int period, double &out[])
 	return true;
 }
 
-double PointsFromPrice(double price_diff)
+bool VolumeBreakoutConfirmed(int vol_ma_period, double factor)
 {
-	double pt = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
-	return price_diff / pt;
+	long volume = iVolume(Symbol(), InpSignalTF, 0);
+	double ma[];
+	if(!iMAOnArrayVolume(vol_ma_period, ma)) return false;
+	double avg = ma[0];
+	return (avg > 0 && (double)volume >= factor * avg);
 }
 
 double CalcPositionSizeByRisk(double stop_points, double risk_percent)
@@ -231,26 +230,88 @@ bool SendOrder(int type, double entry, double sl, double tp, double lots, string
 	return true;
 }
 
+// ========================= Indicator accessors (MQL5 handles) =========================
+bool CopyOne(int handle, int buffer, double &val)
+{
+	double tmp[];
+	if(CopyBuffer(handle, buffer, 0, 1, tmp) != 1) return false;
+	val = tmp[0]; return true;
+}
+bool CopyShift(int handle, int buffer, int shift, double &val)
+{
+	double tmp[];
+	if(CopyBuffer(handle, buffer, shift, 1, tmp) != 1) return false;
+	val = tmp[0]; return true;
+}
+
+// D1 ATR value
+bool GetATR_D1_Val(double &atr_out)
+{
+	return CopyOne(hATR_D1, 0, atr_out);
+}
+
+// Trail ATR (on InpTrailTF)
+bool GetATR_Trail_Val(double &atr_out)
+{
+	return CopyOne(hATR_Trail, 0, atr_out);
+}
+
+// RSI at shift
+bool GetRSI_Shift(int shift, double &out)
+{
+	return CopyShift(hRSI, 0, shift, out);
+}
+
+// EMA at shift
+bool GetEMA_Shift(int shift, double &out)
+{
+	return CopyShift(hEMA, 0, shift, out);
+}
+
+// Bands buffers at shift
+bool GetBandsAt(int shift, double &main, double &upper, double &lower)
+{
+	if(!CopyShift(hBands, 0, shift, main)) return false;
+	if(!CopyShift(hBands, 1, shift, upper)) return false;
+	if(!CopyShift(hBands, 2, shift, lower)) return false;
+	return true;
+}
+
+// CCI at shift
+bool GetCCI_Shift(int shift, double &out)
+{
+	return CopyShift(hCCI, 0, shift, out);
+}
+
+// ZigZag buffer at shift (single buffer in standard ZigZag)
+bool GetZigZag_Shift(int shift, double &v)
+{
+	return CopyShift(hZigZag, 0, shift, v);
+}
+
 // ========================= Macro Filter =========================
 enum MacroTrend { MACRO_UNKNOWN=0, MACRO_UP=1, MACRO_DOWN=2 };
 
-// Very lightweight stub; expects a simple payload like {"trend":"up"} or {"trend":"down"}
 MacroTrend FetchMacroTrend(const string url)
 {
 	if(url == "") return MACRO_UNKNOWN;
 
-	char data[];
+	uchar req_data[]; // empty body
+	uchar result[];
 	string headers;
-	int status = WebRequest("GET", url, "", InpMacroTimeoutMs, data, headers);
+	int timeout = InpMacroTimeoutMs;
+
+	// Overload: WebRequest(method,url,headers,cookie,timeout,const uchar&[],data_size,uchar&[],string&)
+	int status = WebRequest("GET", url, "", "", timeout, req_data, 0, result, headers);
 	if(status != 200)
 	{
 		Print("WebRequest status=", status, " url=", url);
 		return MACRO_UNKNOWN;
 	}
-	string body = CharArrayToString(data, 0, ArraySize(data));
-	body = StringToLower(body);
-	if(StringFind(body, "up") >= 0)   return MACRO_UP;
-	if(StringFind(body, "down") >= 0) return MACRO_DOWN;
+	string body = CharArrayToString(result, 0, (int)ArraySize(result));
+	string low  = StringToLower(body);
+	if(StringFind(low, "trend") >= 0 && StringFind(low, "up") >= 0)   return MACRO_UP;
+	if(StringFind(low, "trend") >= 0 && StringFind(low, "down") >= 0) return MACRO_DOWN;
 	return MACRO_UNKNOWN;
 }
 
@@ -275,7 +336,7 @@ bool ConsolidationBelow(double level, int bars, double tolerancePoints)
 	for(int i=1;i<=bars;i++)
 	{
 		double high = iHigh(Symbol(), InpSignalTF, i);
-		if(high >= level - tol) continue; // allow nudges
+		if(high >= level - tol) continue;
 		if(high >= level + tol) return false;
 	}
 	return true;
@@ -318,7 +379,6 @@ BreakoutSignal Strategy1_Breakout(double rr = 1.5)
 	double pt = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
 	double buffer = InpBreakoutBufferPoints*pt;
 
-	// Buy setup
 	if(ConsolidationBelow(pdh, InpConsolidationBars, InpBreakoutBufferPoints)
 		&& VolumeBreakoutConfirmed(InpVolumeMA_Period, InpVolumeBoostFactor))
 	{
@@ -332,7 +392,6 @@ BreakoutSignal Strategy1_Breakout(double rr = 1.5)
 		return s;
 	}
 
-	// Sell setup
 	if(ConsolidationAbove(pdl, InpConsolidationBars, InpBreakoutBufferPoints)
 		&& VolumeBreakoutConfirmed(InpVolumeMA_Period, InpVolumeBoostFactor))
 	{
@@ -352,13 +411,12 @@ BreakoutSignal Strategy1_Breakout(double rr = 1.5)
 struct DivSignal { bool buy; bool sell; double entry; double sl; double tp; string tag; };
 struct Pivot { int shift; double price; };
 
-int GetLastZigZagPivots(ENUM_TIMEFRAMES tf, int depth, int deviation, int backstep, int max_bars, Pivot &high1, Pivot &high2, Pivot &low1, Pivot &low2)
+bool GetLastZigZagPivots(int max_bars, Pivot &high1, Pivot &high2, Pivot &low1, Pivot &low2)
 {
-	int handle = iCustom(Symbol(), tf, "ZigZag", depth, deviation, backstep);
-	if(handle == INVALID_HANDLE) { Print("ZigZag handle invalid"); return 0; }
-
-	double zz[]; ArraySetAsSeries(zz, true);
-	if(CopyBuffer(handle, 0, 0, max_bars, zz) <= 0) { Print("ZigZag copy failed"); return 0; }
+	if(hZigZag == INVALID_HANDLE) return false;
+	double zz[];
+	if(CopyBuffer(hZigZag, 0, 0, max_bars, zz) <= 0) return false;
+	ArraySetAsSeries(zz, true);
 
 	bool haveH1=false, haveH2=false, haveL1=false, haveL2=false;
 	for(int i=1; i<max_bars && (!haveH2 || !haveL2); i++)
@@ -366,10 +424,10 @@ int GetLastZigZagPivots(ENUM_TIMEFRAMES tf, int depth, int deviation, int backst
 		double v = zz[i];
 		if(v == 0.0) continue;
 
-		double hi_prev = iHigh(Symbol(), tf, i+1);
-		double hi_next = iHigh(Symbol(), tf, i-1);
-		double lo_prev = iLow(Symbol(),  tf, i+1);
-		double lo_next = iLow(Symbol(),  tf, i-1);
+		double hi_prev = iHigh(Symbol(), InpSignalTF, i+1);
+		double hi_next = iHigh(Symbol(), InpSignalTF, i-1);
+		double lo_prev = iLow(Symbol(),  InpSignalTF, i+1);
+		double lo_next = iLow(Symbol(),  InpSignalTF, i-1);
 
 		bool isHigh = (v >= hi_prev && v >= hi_next);
 		bool isLow  = (v <= lo_prev && v <= lo_next);
@@ -385,28 +443,22 @@ int GetLastZigZagPivots(ENUM_TIMEFRAMES tf, int depth, int deviation, int backst
 			else if(!haveL2 && i != low1.shift) { low2.shift = i; low2.price = v; haveL2 = true; }
 		}
 	}
-	return (haveH1 && haveH2 && haveL1 && haveL2) ? 1 : 0;
+	return (haveH1 && haveH2 && haveL1 && haveL2);
 }
-
-double GetRSIAtShift(int shift) { return iRSI(Symbol(), InpSignalTF, InpRSIPeriod, PRICE_CLOSE, shift); }
-double GetEMAAtShift(int period, int shift) { return iMA(Symbol(), InpSignalTF, period, 0, MODE_EMA, PRICE_CLOSE, shift); }
 
 DivSignal Strategy2_Divergence_ZZ()
 {
 	DivSignal s; s.buy=false; s.sell=false; s.entry=0; s.sl=0; s.tp=0; s.tag="S2";
-	const int ZZ_Depth = 12;
-	const int ZZ_Deviation = 5;
-	const int ZZ_Backstep = 3;
 	const int ZZ_MaxBars = 500;
 
 	Pivot h1, h2, l1, l2;
-	if(GetLastZigZagPivots(InpSignalTF, ZZ_Depth, ZZ_Deviation, ZZ_Backstep, ZZ_MaxBars, h1, h2, l1, l2) == 0)
-		return s;
+	if(!GetLastZigZagPivots(ZZ_MaxBars, h1, h2, l1, l2)) return s;
 
-	double rsi_h1 = GetRSIAtShift(h1.shift);
-	double rsi_h2 = GetRSIAtShift(h2.shift);
-	double rsi_l1 = GetRSIAtShift(l1.shift);
-	double rsi_l2 = GetRSIAtShift(l2.shift);
+	double rsi_h1, rsi_h2, rsi_l1, rsi_l2;
+	if(!GetRSI_Shift(h1.shift, rsi_h1)) return s;
+	if(!GetRSI_Shift(h2.shift, rsi_h2)) return s;
+	if(!GetRSI_Shift(l1.shift, rsi_l1)) return s;
+	if(!GetRSI_Shift(l2.shift, rsi_l2)) return s;
 
 	MacroTrend macro = GetMacroContext();
 
@@ -417,7 +469,7 @@ DivSignal Strategy2_Divergence_ZZ()
 
 	if(bearishDiv && (!InpUseMacroFilter || macro == MACRO_UP))
 	{
-		double ema0 = GetEMAAtShift(InpEMA_Period, 0);
+		double ema0; if(!GetEMA_Shift(0, ema0)) return s;
 		double price = SymbolInfoDouble(Symbol(), SYMBOL_BID);
 		if(price > ema0)
 		{
@@ -434,7 +486,7 @@ DivSignal Strategy2_Divergence_ZZ()
 
 	if(bullishDiv && (!InpUseMacroFilter || macro == MACRO_DOWN))
 	{
-		double ema0 = GetEMAAtShift(InpEMA_Period, 0);
+		double ema0; if(!GetEMA_Shift(0, ema0)) return s;
 		double price = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
 		if(price < ema0)
 		{
@@ -454,13 +506,9 @@ DivSignal Strategy2_Divergence_ZZ()
 // ========================= Strategy 3: Squeeze =========================
 struct SqueezeSignal { bool buy; bool sell; double entry; double sl; double tp; string tag; };
 
-double BollingerBandwidth(int period, double dev, int shift)
+bool BollingerAt(int shift, double &main, double &upper, double &lower)
 {
-	double upper = iBands(Symbol(), InpSignalTF, period, dev, 0, PRICE_CLOSE, MODE_UPPER, shift);
-	double lower = iBands(Symbol(), InpSignalTF, period, dev, 0, PRICE_CLOSE, MODE_LOWER, shift);
-	double mid   = iBands(Symbol(), InpSignalTF, period, dev, 0, PRICE_CLOSE, MODE_MAIN,  shift);
-	if(mid == 0) return 0;
-	return (upper - lower) / mid;
+	return GetBandsAt(shift, main, upper, lower);
 }
 
 double SMAOnArray(const double &arr[], int len)
@@ -469,41 +517,50 @@ double SMAOnArray(const double &arr[], int len)
 	return s/MathMax(1,len);
 }
 
-int CCIValue(int shift) { return (int)iCCI(Symbol(), InpSignalTF, InpCCI_Period, PRICE_TYPICAL, shift); }
+bool CCIAt(int shift, double &cci)
+{
+	return GetCCI_Shift(shift, cci);
+}
 
 SqueezeSignal Strategy3_Squeeze()
 {
 	SqueezeSignal s; s.buy=false; s.sell=false; s.entry=0; s.sl=0; s.tp=0; s.tag="S3";
 
-	double bw_now = BollingerBandwidth(InpBB_Period, InpBB_Dev, 0);
-	if(bw_now <= 0) return s;
+	double main0, up0, low0;
+	if(!BollingerAt(0, main0, up0, low0)) return s;
+	if(main0 == 0) return s;
 
+	// Bandwidth now and MA
+	double bw_now = (up0 - low0) / main0;
 	double bw_hist[];
 	ArrayResize(bw_hist, InpBBW_MA_Period);
-	for(int i=0;i<InpBBW_MA_Period;i++){ bw_hist[i]=BollingerBandwidth(InpBB_Period, InpBB_Dev, i+1); }
+	for(int i=0;i<InpBBW_MA_Period;i++)
+	{
+		double m,u,l;
+		if(!BollingerAt(i+1, m, u, l)) { bw_hist[i]=0; continue; }
+		if(m != 0) bw_hist[i] = (u - l) / m; else bw_hist[i] = 0;
+	}
 	double bw_ma = SMAOnArray(bw_hist, InpBBW_MA_Period);
 
 	bool in_squeeze = (bw_ma>0 && bw_now < InpBBW_RatioThreshold*bw_ma);
 	if(!in_squeeze) return s;
 
 	double close0 = iClose(Symbol(), InpSignalTF, 0);
-	double upper0 = iBands(Symbol(), InpSignalTF, InpBB_Period, InpBB_Dev, 0, PRICE_CLOSE, MODE_UPPER, 0);
-	double lower0 = iBands(Symbol(), InpSignalTF, InpBB_Period, InpBB_Dev, 0, PRICE_CLOSE, MODE_LOWER, 0);
-	int cci0 = CCIValue(0);
+	double cci0; if(!CCIAt(0, cci0)) return s;
 
 	double pt = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
 
-	if(close0 > upper0 && cci0 >= InpCCI_Confirm)
+	if(close0 > up0 && cci0 >= InpCCI_Confirm)
 	{
-		double sl = lower0 - 2*pt*InpBreakoutBufferPoints;
+		double sl = low0 - 2*pt*InpBreakoutBufferPoints;
 		double risk_points = PointsFromPrice(close0 - sl);
 		double tp = close0 + 2*risk_points*pt;
 		s.buy=true; s.entry=NormalizeSLTPPrice(SymbolInfoDouble(Symbol(), SYMBOL_ASK)); s.sl=NormalizeSLTPPrice(sl); s.tp=NormalizeSLTPPrice(tp);
 		return s;
 	}
-	if(close0 < lower0 && cci0 <= -InpCCI_Confirm)
+	if(close0 < low0 && cci0 <= -InpCCI_Confirm)
 	{
-		double sl = upper0 + 2*pt*InpBreakoutBufferPoints;
+		double sl = up0 + 2*pt*InpBreakoutBufferPoints;
 		double risk_points = PointsFromPrice(sl - close0);
 		double tp = close0 - 2*risk_points*pt;
 		s.sell=true; s.entry=NormalizeSLTPPrice(SymbolInfoDouble(Symbol(), SYMBOL_BID)); s.sl=NormalizeSLTPPrice(sl); s.tp=NormalizeSLTPPrice(tp);
@@ -516,7 +573,7 @@ SqueezeSignal Strategy3_Squeeze()
 string GenerateTradeId(const string strategyTag)
 {
 	long ms = GetMicrosecondCount();
-	return strategyTag + "#" + IntegerToString((int)TimeCurrent()) + "-" + IntegerToString((int)(ms%1000000));
+	return strategyTag + "#" + IntegerToString((int)TimeCurrent()) + "-" + LongToString(ms);
 }
 
 bool ModifySLForTicket(ulong ticket, double newSL)
@@ -531,17 +588,17 @@ bool ModifySLForTicket(ulong ticket, double newSL)
 	req.tp          = PositionGetDouble(POSITION_TP);
 	req.type_time   = ORDER_TIME_GTC;
 	req.type_filling= ORDER_FILLING_FOK;
-	return OrderSend(req, res);
+	bool ok = OrderSend(req, res);
+	if(!ok) Print("Modify SL failed ret=", res.retcode, " err=", GetLastError());
+	return ok;
 }
 
-// Split order into TP1 and TP2 legs; TP2 can be trailing-only if Chandelier is enabled
 bool SendOrderMultiTP(bool isBuy, double entry, double sl, double risk_points, double lotsBase, string strategyTag)
 {
 	if(!InpUseMultiTP)
 	{
 		int type = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-		double tp_stub = 0.0; // Keep 0 here; strategies' fixed TP not used in multi-TP mode
-		return SendOrder(type, entry, sl, tp_stub, lotsBase, strategyTag);
+		return SendOrder(type, entry, sl, 0.0, lotsBase, strategyTag);
 	}
 
 	double lot1 = lotsBase * InpTP1_VolumeRatio;
@@ -556,40 +613,31 @@ bool SendOrderMultiTP(bool isBuy, double entry, double sl, double risk_points, d
 	double pt = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
 
 	double tp1 = 0.0, tp2 = 0.0;
-	if(isBuy)
-	{
-		tp1 = entry + InpTP1_RR * risk_points * pt;
-		tp2 = entry + InpTP2_RR * risk_points * pt;
-	}
-	else
-	{
-		tp1 = entry - InpTP1_RR * risk_points * pt;
-		tp2 = entry - InpTP2_RR * risk_points * pt;
-	}
+	if(isBuy){ tp1 = entry + InpTP1_RR * risk_points * pt; tp2 = entry + InpTP2_RR * risk_points * pt; }
+	else { tp1 = entry - InpTP1_RR * risk_points * pt; tp2 = entry - InpTP2_RR * risk_points * pt; }
 
 	string baseId = GenerateTradeId(strategyTag);
 
-	// TP1 leg (fixed TP at RR1)
+	bool okall = true;
+
 	if(lot1 >= min_lot)
 	{
 		int type = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
 		string cmt = strategyTag + "-TP1:" + baseId;
-		SendOrder(type, entry, sl, NormalizeSLTPPrice(tp1), lot1, cmt);
+		okall &= SendOrder(type, entry, sl, NormalizeSLTPPrice(tp1), lot1, cmt);
 	}
 
-	// TP2 leg (fixed TP at RR2 or trailing if Chandelier)
 	if(lot2 >= min_lot)
 	{
 		int type = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
 		string cmt = strategyTag + "-TP2:" + baseId;
 		double tp2_to_use = InpUseChandelierExit ? 0.0 : NormalizeSLTPPrice(tp2);
-		SendOrder(type, entry, sl, tp2_to_use, lot2, cmt);
+		okall &= SendOrder(type, entry, sl, tp2_to_use, lot2, cmt);
 	}
 
-	return true;
+	return okall;
 }
 
-// Determine if BE+offset must be enforced for a TP2 leg, and output required SL
 bool GetBreakevenRequirementForPosition(ulong posTicket, double &requiredSLOut)
 {
 	requiredSLOut = 0.0;
@@ -599,12 +647,11 @@ bool GetBreakevenRequirementForPosition(ulong posTicket, double &requiredSLOut)
 
 	string cmt = PositionGetString(POSITION_COMMENT);
 	int pos = StringFind(cmt, "-TP2:");
-	if(pos < 0) return false; // only enforce on TP2 legs
+	if(pos < 0) return false;
 
 	string baseId = StringSubstr(cmt, pos + 5);
 	if(baseId == "") return false;
 
-	// Is the matching TP1 leg closed?
 	datetime t0 = TimeCurrent() - 2*24*60*60;
 	HistorySelect(t0, TimeCurrent());
 	bool tp1Closed = false;
@@ -636,7 +683,6 @@ bool GetBreakevenRequirementForPosition(ulong posTicket, double &requiredSLOut)
 	return true;
 }
 
-// Continuously enforce BE+offset for TP2 after TP1 is closed
 void ApplyBreakevenIfTP1Closed()
 {
 	if(!InpUseMultiTP || !InpEnforceBreakeven) return;
@@ -661,13 +707,12 @@ void ApplyBreakevenIfTP1Closed()
 		{
 			if(curSL <= 0 || curSL < requiredSL) { newSL = requiredSL; needsUpdate = true; }
 		}
-		else // sell
+		else
 		{
 			if(curSL <= 0 || curSL > requiredSL) { newSL = requiredSL; needsUpdate = true; }
 		}
 
-		if(needsUpdate)
-			ModifySLForTicket(ticket, NormalizeSLTPPrice(newSL));
+		if(needsUpdate) ModifySLForTicket(ticket, NormalizeSLTPPrice(newSL));
 	}
 }
 
@@ -678,11 +723,15 @@ void UpdateChandelierTrailForSymbol()
 	if(total <= 0) return;
 
 	double pt = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
-	double atr = iATR(Symbol(), InpTrailTF, InpChandATRPeriod, 0);
-	if(atr <= 0) return;
 
-	double highest = iHigh(Symbol(), InpTrailTF, iHighest(Symbol(), InpTrailTF, MODE_HIGH, InpChandLookback, 1));
-	double lowest  = iLow(Symbol(),  InpTrailTF, iLowest(Symbol(), InpTrailTF, MODE_LOW,  InpChandLookback, 1));
+	double atr; if(!GetATR_Trail_Val(atr)) return;
+
+	// Highest/Lowest on trail TF across lookback window
+	int idxHigh = iHighest(Symbol(), InpTrailTF, MODE_HIGH, InpChandLookback, 1);
+	int idxLow  = iLowest(Symbol(),  InpTrailTF, MODE_LOW,  InpChandLookback, 1);
+	if(idxHigh < 0 || idxLow < 0) return;
+	double highest = iHigh(Symbol(), InpTrailTF, idxHigh);
+	double lowest  = iLow(Symbol(),  InpTrailTF, idxLow);
 	if(highest == 0 || lowest == 0) return;
 
 	for(int i=total-1; i>=0; --i)
@@ -692,7 +741,6 @@ void UpdateChandelierTrailForSymbol()
 		if(PositionGetString(POSITION_SYMBOL) != Symbol()) continue;
 
 		long type     = PositionGetInteger(POSITION_TYPE);
-		double volume = PositionGetDouble(POSITION_VOLUME);
 		double sl     = PositionGetDouble(POSITION_SL);
 		double tp     = PositionGetDouble(POSITION_TP);
 		double price_open = PositionGetDouble(POSITION_PRICE_OPEN);
@@ -720,7 +768,6 @@ void UpdateChandelierTrailForSymbol()
 			if(tp > 0) tp = 0.0;
 		}
 
-		// Enforce breakeven floor/ceiling for TP2 legs once TP1 is closed
 		double beRequired;
 		if(GetBreakevenRequirementForPosition(ticket, beRequired))
 		{
@@ -736,7 +783,7 @@ void UpdateChandelierTrailForSymbol()
 		ZeroMemory(req); ZeroMemory(res);
 		req.action      = TRADE_ACTION_SLTP;
 		req.symbol      = Symbol();
-		req.volume      = volume;
+		req.volume      = PositionGetDouble(POSITION_VOLUME);
 		req.sl          = NormalizeDouble(new_sl, (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS));
 		req.tp          = tp;
 		req.type_time   = ORDER_TIME_GTC;
@@ -779,20 +826,45 @@ void CloseAllPositionsForSymbol()
 		req.type   = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
 		req.price  = price;
 		req.deviation = (int)InpSlippagePoints;
-		OrderSend(req, res);
+		bool ok = OrderSend(req, res);
+		if(!ok) Print("Close failed ret=", res.retcode, " err=", GetLastError());
 	}
 }
 
 // ========================= Lifecycle =========================
 int OnInit()
 {
-	Print("XAU_Quantum_EA v1.2 initialized on ", Symbol());
+	Print("XAU_Quantum_EA v1.3 initialized on ", Symbol());
 	g_equityPeak = AccountInfoDouble(ACCOUNT_EQUITY);
+
+	// Create indicator handles
+	hATR_D1   = iATR(Symbol(), InpATR_TF, 14);
+	hATR_Trail= iATR(Symbol(), InpTrailTF, InpChandATRPeriod);
+	hRSI      = iRSI(Symbol(), InpSignalTF, InpRSIPeriod, PRICE_CLOSE);
+	hEMA      = iMA(Symbol(), InpSignalTF, InpEMA_Period, 0, MODE_EMA, PRICE_CLOSE);
+	hBands    = iBands(Symbol(), InpSignalTF, InpBB_Period, InpBB_Dev, 0.0, PRICE_CLOSE);
+	hCCI      = iCCI(Symbol(), InpSignalTF, InpCCI_Period, PRICE_TYPICAL);
+	// Standard ZigZag inputs: Depth, Deviation, Backstep
+	hZigZag   = iCustom(Symbol(), InpSignalTF, "ZigZag", 12, 5, 3);
+
+	if(hATR_D1==INVALID_HANDLE || hATR_Trail==INVALID_HANDLE || hRSI==INVALID_HANDLE ||
+	   hEMA==INVALID_HANDLE || hBands==INVALID_HANDLE || hCCI==INVALID_HANDLE || hZigZag==INVALID_HANDLE)
+	{
+		Print("Init error: indicator handle invalid");
+		return INIT_FAILED;
+	}
 	return(INIT_SUCCEEDED);
 }
 
 void OnDeinit(const int reason)
 {
+	if(hATR_D1!=INVALID_HANDLE)    IndicatorRelease(hATR_D1);
+	if(hATR_Trail!=INVALID_HANDLE) IndicatorRelease(hATR_Trail);
+	if(hRSI!=INVALID_HANDLE)       IndicatorRelease(hRSI);
+	if(hEMA!=INVALID_HANDLE)       IndicatorRelease(hEMA);
+	if(hBands!=INVALID_HANDLE)     IndicatorRelease(hBands);
+	if(hCCI!=INVALID_HANDLE)       IndicatorRelease(hCCI);
+	if(hZigZag!=INVALID_HANDLE)    IndicatorRelease(hZigZag);
 	Print("XAU_Quantum_EA deinit, reason=", reason);
 }
 
@@ -820,8 +892,8 @@ void OnTick()
 	if(!IsWithinSessionGMT(now_gmt)) return;
 
 	// Volatility (ATR) filter on D1
-	double atr_d1 = GetATR(InpATR_TF, 14);
-	if(atr_d1 <= 0) return;
+	double atr_d1;
+	if(!GetATR_D1_Val(atr_d1)) return;
 	double atr_points = PointsFromPrice(atr_d1);
 	if(atr_points < InpATR_Min || atr_points > InpATR_Max) return;
 
