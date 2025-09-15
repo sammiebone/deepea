@@ -532,8 +532,10 @@ int findDivergence(int start_shift)
     {
         double price1 = iLow(_Symbol, _Period, p1_shift);
         double price2 = iLow(_Symbol, _Period, p2_shift);
-        double rsi1 = rsi_buffer[(int)(p1_shift - start_shift)];
-        double rsi2 = rsi_buffer[(int)(p2_shift - start_shift)];
+        int index1 = (int)(p1_shift - start_shift);
+        int index2 = (int)(p2_shift - start_shift);
+        double rsi1 = rsi_buffer[index1];
+        double rsi2 = rsi_buffer[index2];
         if(price2 < price1 && rsi2 > rsi1) return p2_shift;
     }
 
@@ -544,8 +546,10 @@ int findDivergence(int start_shift)
     {
         double price1 = iHigh(_Symbol, _Period, p1_shift);
         double price2 = iHigh(_Symbol, _Period, p2_shift);
-        double rsi1 = rsi_buffer[(int)(p1_shift - start_shift)];
-        double rsi2 = rsi_buffer[(int)(p2_shift - start_shift)];
+        int index1 = (int)(p1_shift - start_shift);
+        int index2 = (int)(p2_shift - start_shift);
+        double rsi1 = rsi_buffer[index1];
+        double rsi2 = rsi_buffer[index2];
         if(price2 > price1 && rsi2 < rsi1) return -p2_shift;
     }
     return 0;
